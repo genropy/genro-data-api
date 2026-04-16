@@ -9,8 +9,10 @@ Write operations (POST, PATCH, DELETE) return 405 Method Not Allowed.
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
+from decimal import Decimal
 
 from genro_data_api.core.backend import DataApiBackend, QueryOptions
 from genro_data_api.odata.csdl_renderer import CsdlRenderer
@@ -23,6 +25,22 @@ _ENTITY_PATH_RE = re.compile(r"^/([^/(]+)(?:\(([^)]*)\))?(/\$count)?$")
 _JSON_CT = "application/json;charset=UTF-8"
 _XML_CT = "application/xml;charset=UTF-8"
 _TEXT_CT = "text/plain"
+
+
+def _json_default(obj: object) -> str | float:
+    """JSON serializer for types not handled by stdlib json."""
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    if isinstance(obj, datetime.time):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return str(obj)
+
+
+def _dumps(obj: object) -> str:
+    """JSON serialize with OData-safe type handling."""
+    return json.dumps(obj, default=_json_default, ensure_ascii=False)
 
 
 class ODataRequestHandler:
@@ -91,7 +109,7 @@ class ODataRequestHandler:
     def _strip_root(self, path: str) -> str | None:
         if not path.startswith(self._service_root):
             return None
-        return path[len(self._service_root) :]
+        return path[len(self._service_root):]
 
     def _entity_exists(self, entity_name: str) -> bool:
         names = {es["name"] for es in self._backend.entity_sets()}
@@ -107,12 +125,10 @@ class ODataRequestHandler:
             }
             for es in entity_sets
         ]
-        body = json.dumps(
-            {
-                "@odata.context": f"{self._service_root}/$metadata",
-                "value": value,
-            }
-        )
+        body = _dumps({
+            "@odata.context": f"{self._service_root}/$metadata",
+            "value": value,
+        })
         return 200, {"Content-Type": _JSON_CT}, body
 
     def _handle_metadata(self) -> tuple[int, dict[str, str], str]:
@@ -131,7 +147,7 @@ class ODataRequestHandler:
         payload = self._formatter.format_collection(
             entity_name, result, self._service_root, opts.skip, opts.top
         )
-        return 200, {"Content-Type": _JSON_CT}, json.dumps(payload)
+        return 200, {"Content-Type": _JSON_CT}, _dumps(payload)
 
     def _handle_single(
         self, entity_name: str, key_str: str
@@ -141,7 +157,7 @@ class ODataRequestHandler:
         if record is None:
             return self._error(404, f"{entity_name}({key_str!r}) not found")
         payload = self._formatter.format_entity(entity_name, record, self._service_root)
-        return 200, {"Content-Type": _JSON_CT}, json.dumps(payload)
+        return 200, {"Content-Type": _JSON_CT}, _dumps(payload)
 
     def _handle_count(
         self, entity_name: str, query_params: dict[str, str]
@@ -226,7 +242,7 @@ class ODataRequestHandler:
         message: str,
         extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], str]:
-        body = json.dumps({"error": {"code": str(status), "message": message}})
+        body = _dumps({"error": {"code": str(status), "message": message}})
         headers: dict[str, str] = {"Content-Type": _JSON_CT}
         if extra_headers:
             headers.update(extra_headers)
