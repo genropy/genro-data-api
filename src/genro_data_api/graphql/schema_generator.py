@@ -85,6 +85,17 @@ class GraphQLSchemaGenerator:
         """Convert entity name to snake_case GraphQL field name."""
         return re.sub(r"[.\-]", "_", entity_name)
 
+    def _prop_name(self, name: str) -> str:
+        """Sanitize a property name for GraphQL.
+
+        GraphQL reserves names starting with '__' for introspection.
+        GenroPy system fields (__ins_ts, __del_ts, __mod_ts, __ins_user,
+        __is_draft) are renamed with 'sys_' prefix.
+        """
+        if name.startswith("__"):
+            return "sys" + name[1:]  # __ins_ts -> sys_ins_ts
+        return name
+
     def _scalar_for_prop(self, prop: dict[str, Any]) -> GraphQLScalarType | GraphQLNonNull:
         """Get the GraphQL scalar type for a property dict."""
         gnr_type = prop.get("type", "A")
@@ -111,7 +122,13 @@ class GraphQLSchemaGenerator:
         def fields() -> dict[str, GraphQLField]:
             result: dict[str, GraphQLField] = {}
             for prop in meta.get("properties", []):
-                result[prop["name"]] = GraphQLField(self._scalar_for_prop(prop))
+                orig_name = prop["name"]
+                gql_name = self._prop_name(orig_name)
+                if gql_name != orig_name:
+                    resolver = self._make_renamed_resolver(orig_name)
+                    result[gql_name] = GraphQLField(self._scalar_for_prop(prop), resolve=resolver)
+                else:
+                    result[gql_name] = GraphQLField(self._scalar_for_prop(prop))
             for nav in meta.get("navigation", []):
                 target = nav["target"]
                 target_type = types_by_name.get(target)
@@ -128,6 +145,14 @@ class GraphQLSchemaGenerator:
             return result
 
         return GraphQLObjectType(type_name, fields)
+
+    def _make_renamed_resolver(self, original_name: str) -> Any:
+        """Create a resolver that maps a sanitized GraphQL name back to the original."""
+
+        def resolver(root: dict[str, Any], info: Any) -> Any:
+            return root.get(original_name)
+
+        return resolver
 
     def _make_nav_resolver(self, nav_name: str, is_collection: bool) -> Any:
         """Create a resolver for a navigation property.
