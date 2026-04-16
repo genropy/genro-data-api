@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genro-data-api-wsgi"
+version = "0.1.0"
+description = "OData v4 WSGI handler for GenroPy sites"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Genropy Team" }]
+dependencies = [
+    "genro-data-api>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/genro_data_api_wsgi"]

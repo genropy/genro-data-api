@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genro-data-api-asgi"
+version = "0.1.0"
+description = "OData v4 application for genro-asgi"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Genropy Team" }]
+dependencies = [
+    "genro-asgi>=0.5.0",
+    "genro-data-api>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/genro_data_api_asgi"]
