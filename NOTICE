@@ -1,0 +1,11 @@
+genro-data-api
+Copyright 2025 Softwell S.r.l.
+
+This product includes software developed at
+Softwell S.r.l. (https://www.softwell.it/).
+
+This project is part of the Genro Modules ecosystem,
+providing standardized data API protocols (OData, GraphQL)
+for the Genropy framework.
+
+Licensed under the Apache License, Version 2.0.
