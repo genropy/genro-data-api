@@ -8,7 +8,9 @@ import pytest
 
 from genro_data_api.odata.filter_parser import (
     ComparisonNode,
+    FunctionCallNode,
     FunctionNode,
+    InNode,
     LogicalNode,
     ODataFilterParser,
 )
@@ -23,7 +25,7 @@ class TestSimpleComparisons:
     def test_string_eq(self, parser: ODataFilterParser) -> None:
         node = parser.parse("name eq 'Alice'")
         assert isinstance(node, ComparisonNode)
-        assert node.field == "name"
+        assert node.field == "$name"
         assert node.op == "eq"
         assert node.value == "Alice"
 
@@ -88,7 +90,7 @@ class TestSimpleComparisons:
     def test_navigation_path_field(self, parser: ODataFilterParser) -> None:
         node = parser.parse("Category/Name eq 'Tools'")
         assert isinstance(node, ComparisonNode)
-        assert node.field == "Category/Name"
+        assert node.field == "@Category.Name"
 
 
 class TestFunctions:
@@ -96,14 +98,14 @@ class TestFunctions:
         node = parser.parse("contains(name, 'Ali')")
         assert isinstance(node, FunctionNode)
         assert node.name == "contains"
-        assert node.field == "name"
+        assert node.field == "$name"
         assert node.value == "Ali"
 
     def test_startswith(self, parser: ODataFilterParser) -> None:
         node = parser.parse("startswith(email, 'admin')")
         assert isinstance(node, FunctionNode)
         assert node.name == "startswith"
-        assert node.field == "email"
+        assert node.field == "$email"
         assert node.value == "admin"
 
     def test_endswith(self, parser: ODataFilterParser) -> None:
@@ -176,7 +178,7 @@ class TestToDict:
     def test_comparison_to_dict(self, parser: ODataFilterParser) -> None:
         node = parser.parse("name eq 'Alice'")
         d = node.to_dict()
-        assert d == {"type": "comparison", "field": "name", "op": "eq", "value": "Alice"}
+        assert d == {"type": "comparison", "field": "$name", "op": "eq", "value": "Alice"}
 
     def test_logical_to_dict(self, parser: ODataFilterParser) -> None:
         node = parser.parse("a eq 1 and b eq 2")
@@ -188,7 +190,7 @@ class TestToDict:
     def test_function_to_dict(self, parser: ODataFilterParser) -> None:
         node = parser.parse("contains(name, 'foo')")
         d = node.to_dict()
-        assert d == {"type": "function", "name": "contains", "field": "name", "value": "foo"}
+        assert d == {"type": "function", "name": "contains", "field": "$name", "value": "foo"}
 
 
 class TestErrors:
@@ -219,3 +221,133 @@ class TestErrors:
     def test_invalid_char(self, parser: ODataFilterParser) -> None:
         with pytest.raises(ValueError, match="Unexpected character"):
             parser.parse("name eq @value")
+
+
+class TestInOperator:
+    def test_in_with_strings(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("status in ('A','B','C')")
+        assert isinstance(node, InNode)
+        assert node.field == "$status"
+        assert node.values == ["A", "B", "C"]
+
+    def test_in_with_numbers(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("id in (1, 2, 3)")
+        assert isinstance(node, InNode)
+        assert node.values == [1, 2, 3]
+
+    def test_in_single_value(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("status in ('pending')")
+        assert isinstance(node, InNode)
+        assert node.values == ["pending"]
+
+    def test_in_inside_logical(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("active eq true and status in ('A','B')")
+        assert isinstance(node, LogicalNode)
+        assert node.op == "and"
+        assert isinstance(node.children[1], InNode)
+
+    def test_in_empty_list_raises(self, parser: ODataFilterParser) -> None:
+        with pytest.raises(ValueError, match="'in' operator requires"):
+            parser.parse("status in ()")
+
+
+class TestScalarFunctionsInComparison:
+    def test_year_on_date_field(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("year(data) eq 2024")
+        assert isinstance(node, ComparisonNode)
+        assert isinstance(node.field, FunctionCallNode)
+        assert node.field.name == "year"
+        assert node.field.args == ["$data"]
+        assert node.value == 2024
+
+    def test_tolower_equality(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("tolower(name) eq 'alice'")
+        assert isinstance(node, ComparisonNode)
+        assert isinstance(node.field, FunctionCallNode)
+        assert node.field.name == "tolower"
+        assert node.value == "alice"
+
+    def test_length_gt(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("length(name) gt 5")
+        assert isinstance(node, ComparisonNode)
+        assert isinstance(node.field, FunctionCallNode)
+        assert node.field.name == "length"
+
+    def test_substring_two_args(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("substring(name, 0) eq 'Al'")
+        assert isinstance(node, ComparisonNode)
+        call = node.field
+        assert isinstance(call, FunctionCallNode)
+        assert call.name == "substring"
+        assert call.args == ["$name", 0]
+
+    def test_substring_three_args(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("substring(name, 0, 3) eq 'Ali'")
+        assert isinstance(node, ComparisonNode)
+        call = node.field
+        assert isinstance(call, FunctionCallNode)
+        assert call.args == ["$name", 0, 3]
+
+    def test_concat_two_fields(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("concat(first_name, last_name) eq 'AliceCorp'")
+        assert isinstance(node, ComparisonNode)
+        call = node.field
+        assert isinstance(call, FunctionCallNode)
+        assert call.name == "concat"
+        assert call.args == ["$first_name", "$last_name"]
+
+    def test_now_no_args_on_rhs(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("created_at le now()")
+        assert isinstance(node, ComparisonNode)
+        assert node.field == "$created_at"
+        assert isinstance(node.value, FunctionCallNode)
+        assert node.value.name == "now"
+        assert node.value.args == []
+
+    def test_nested_calls(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("length(trim(name)) gt 0")
+        assert isinstance(node, ComparisonNode)
+        outer = node.field
+        assert isinstance(outer, FunctionCallNode)
+        assert outer.name == "length"
+        inner = outer.args[0]
+        assert isinstance(inner, FunctionCallNode)
+        assert inner.name == "trim"
+
+    def test_cast_to_int(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("cast(price, 'Edm.Int32') eq 100")
+        assert isinstance(node, ComparisonNode)
+        call = node.field
+        assert isinstance(call, FunctionCallNode)
+        assert call.name == "cast"
+        assert call.args == ["$price", "Edm.Int32"]
+
+    def test_round_field(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("round(price) eq 100")
+        assert isinstance(node, ComparisonNode)
+        call = node.field
+        assert isinstance(call, FunctionCallNode)
+        assert call.name == "round"
+
+
+class TestScalarFunctionsInIn:
+    def test_year_in_range(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("year(data) in (2023, 2024)")
+        assert isinstance(node, InNode)
+        assert isinstance(node.field, FunctionCallNode)
+        assert node.field.name == "year"
+        assert node.values == [2023, 2024]
+
+
+class TestBooleanFunctionsStillWork:
+    """Sanity checks that contains/startswith/endswith survived the refactor."""
+
+    def test_contains(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("contains(name, 'Cor')")
+        assert isinstance(node, FunctionNode)
+        assert node.name == "contains"
+
+    def test_startswith(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("startswith(name, 'A')")
+        assert isinstance(node, FunctionNode)
+        assert node.name == "startswith"

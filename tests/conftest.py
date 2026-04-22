@@ -12,7 +12,9 @@ from genro_data_api.core.backend import QueryOptions, QueryResult
 from genro_data_api.odata.filter_parser import (
     ComparisonNode,
     FilterNode,
+    FunctionCallNode,
     FunctionNode,
+    InNode,
     LogicalNode,
     ODataFilterParser,
 )
@@ -151,15 +153,68 @@ class MockBackend:
     def _eval_node(self, node: FilterNode, record: dict[str, Any]) -> bool:
         if isinstance(node, ComparisonNode):
             return self._eval_comparison(node, record)
+        if isinstance(node, InNode):
+            return self._eval_in(node, record)
         if isinstance(node, LogicalNode):
             return self._eval_logical(node, record)
         if isinstance(node, FunctionNode):
             return self._eval_function(node, record)
         return False
 
+    def _eval_expr(self, expr: Any, record: dict[str, Any]) -> Any:
+        """Evaluate a parsed expression against a record.
+
+        Field refs are marked by the parser with ``$`` (local column) or
+        ``@`` (navigation path); everything else is a literal value.
+        """
+        if isinstance(expr, FunctionCallNode):
+            return self._eval_function_call(expr, record)
+        if isinstance(expr, str) and expr[:1] == "$":
+            return record.get(expr[1:])
+        if isinstance(expr, str) and expr[:1] == "@":
+            # minimal navigation support: flat lookup using the dotted path as key
+            return record.get(expr[1:])
+        return expr
+
+    def _eval_function_call(
+        self, node: FunctionCallNode, record: dict[str, Any]
+    ) -> Any:
+        args = [self._eval_expr(a, record) for a in node.args]
+        if node.name == "tolower":
+            return (args[0] or "").lower()
+        if node.name == "toupper":
+            return (args[0] or "").upper()
+        if node.name == "trim":
+            return (args[0] or "").strip()
+        if node.name == "length":
+            return len(args[0] or "")
+        if node.name == "concat":
+            return "".join(str(a or "") for a in args)
+        if node.name == "year":
+            v = args[0]
+            return v.year if v is not None else None
+        if node.name == "month":
+            v = args[0]
+            return v.month if v is not None else None
+        if node.name == "day":
+            v = args[0]
+            return v.day if v is not None else None
+        if node.name == "now":
+            import datetime
+            return datetime.datetime.now(datetime.timezone.utc)
+        if node.name == "round":
+            return round(args[0]) if args[0] is not None else None
+        if node.name == "floor":
+            import math
+            return math.floor(args[0]) if args[0] is not None else None
+        if node.name == "ceiling":
+            import math
+            return math.ceil(args[0]) if args[0] is not None else None
+        return None
+
     def _eval_comparison(self, node: ComparisonNode, record: dict[str, Any]) -> bool:
-        field_val = record.get(node.field)
-        val = node.value
+        field_val = self._eval_expr(node.field, record)
+        val = self._eval_expr(node.value, record)
         if node.op == "eq":
             return field_val == val
         if node.op == "ne":
@@ -176,6 +231,10 @@ class MockBackend:
             return field_val <= val  # type: ignore[operator]
         return False
 
+    def _eval_in(self, node: InNode, record: dict[str, Any]) -> bool:
+        field_val = self._eval_expr(node.field, record)
+        return field_val in node.values
+
     def _eval_logical(self, node: LogicalNode, record: dict[str, Any]) -> bool:
         if node.op == "and":
             return all(self._eval_node(c, record) for c in node.children)
@@ -186,7 +245,8 @@ class MockBackend:
         return False
 
     def _eval_function(self, node: FunctionNode, record: dict[str, Any]) -> bool:
-        field_val = str(record.get(node.field, ""))
+        raw = self._eval_expr(node.field, record)
+        field_val = str(raw or "")
         val = node.value
         if node.name == "contains":
             return val in field_val

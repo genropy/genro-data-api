@@ -144,6 +144,38 @@ class TestCollectionEndpoint:
         assert len(data["value"]) == 1
         assert "Corp" in data["value"][0]["name"]
 
+    def test_filter_in_strings(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET", "/odata/customer", {"$filter": "country in ('IT', 'DE')"}
+        )
+        data = json.loads(body)
+        countries = sorted(r["country"] for r in data["value"])
+        assert countries == ["DE", "IT"]
+
+    def test_filter_in_single(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET", "/odata/customer", {"$filter": "country in ('US')"}
+        )
+        data = json.loads(body)
+        assert len(data["value"]) == 1
+        assert data["value"][0]["country"] == "US"
+
+    def test_filter_tolower_eq(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET", "/odata/customer", {"$filter": "tolower(name) eq 'alice corp'"}
+        )
+        data = json.loads(body)
+        assert len(data["value"]) == 1
+        assert data["value"][0]["name"] == "Alice Corp"
+
+    def test_filter_length_gt(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET", "/odata/customer", {"$filter": "length(name) gt 7"}
+        )
+        data = json.loads(body)
+        names = sorted(r["name"] for r in data["value"])
+        assert names == ["Alice Corp", "Charlie GmbH"]
+
     def test_orderby_asc(self, handler: ODataRequestHandler) -> None:
         _, _, body = handler.handle("GET", "/odata/customer", {"$orderby": "name asc"})
         data = json.loads(body)
