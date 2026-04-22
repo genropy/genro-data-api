@@ -223,3 +223,150 @@ class TestCountEndpoint:
             "GET", "/odata/customer/$count", {"$filter": "active eq true"}
         )
         assert int(body) == 2
+
+
+class TestHeaderConformance:
+    def test_service_document_sets_odata_version(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, headers, _ = handler.handle("GET", "/odata", {})
+        assert headers.get("OData-Version") == "4.0"
+
+    def test_metadata_sets_odata_version(self, handler: ODataRequestHandler) -> None:
+        _, headers, _ = handler.handle("GET", "/odata/$metadata", {})
+        assert headers.get("OData-Version") == "4.0"
+
+    def test_collection_sets_odata_version(self, handler: ODataRequestHandler) -> None:
+        _, headers, _ = handler.handle("GET", "/odata/customer", {})
+        assert headers.get("OData-Version") == "4.0"
+
+    def test_single_entity_sets_odata_version(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, headers, _ = handler.handle("GET", "/odata/customer(1)", {})
+        assert headers.get("OData-Version") == "4.0"
+
+    def test_count_endpoint_sets_odata_version(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, headers, _ = handler.handle("GET", "/odata/customer/$count", {})
+        assert headers.get("OData-Version") == "4.0"
+
+    def test_error_response_sets_odata_version(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, headers, _ = handler.handle("GET", "/odata/nonexistent", {})
+        assert headers.get("OData-Version") == "4.0"
+
+    def test_405_response_sets_odata_version(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, headers, _ = handler.handle("POST", "/odata/customer", {})
+        assert headers.get("OData-Version") == "4.0"
+
+
+class TestODataMaxVersion:
+    def test_legacy_v3_client_rejected(self, handler: ODataRequestHandler) -> None:
+        status, _, body = handler.handle(
+            "GET", "/odata/customer", {}, request_headers={"OData-MaxVersion": "3.0"}
+        )
+        assert status == 400
+        assert "OData v4" in json.loads(body)["error"]["message"]
+
+    def test_legacy_v2_client_rejected(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {}, request_headers={"OData-MaxVersion": "2.0"}
+        )
+        assert status == 400
+
+    def test_v4_client_accepted(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {}, request_headers={"OData-MaxVersion": "4.0"}
+        )
+        assert status == 200
+
+    def test_v5_future_client_accepted(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {}, request_headers={"OData-MaxVersion": "5.0"}
+        )
+        assert status == 200
+
+    def test_missing_header_is_tolerated(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle("GET", "/odata/customer", {}, request_headers={})
+        assert status == 200
+
+    def test_header_name_case_insensitive(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {}, request_headers={"odata-maxversion": "3.0"}
+        )
+        assert status == 400
+
+    def test_malformed_version_rejected(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {}, request_headers={"OData-MaxVersion": "abc"}
+        )
+        assert status == 400
+
+
+class TestFormatQueryParam:
+    def test_format_json_on_collection_returns_json(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, headers, _ = handler.handle(
+            "GET", "/odata/customer", {"$format": "json"}
+        )
+        assert status == 200
+        assert "json" in headers.get("Content-Type", "")
+
+    def test_format_xml_on_collection_returns_406(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {"$format": "xml"}
+        )
+        assert status == 406
+
+    def test_format_xml_on_single_entity_returns_406(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer(1)", {"$format": "xml"}
+        )
+        assert status == 406
+
+    def test_format_xml_on_service_document_returns_406(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle("GET", "/odata", {"$format": "xml"})
+        assert status == 406
+
+    def test_format_json_on_metadata_returns_406(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle("GET", "/odata/$metadata", {"$format": "json"})
+        assert status == 406
+
+    def test_format_xml_on_metadata_returns_200(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, headers, _ = handler.handle(
+            "GET", "/odata/$metadata", {"$format": "xml"}
+        )
+        assert status == 200
+        assert "xml" in headers.get("Content-Type", "")
+
+    def test_unknown_format_returns_400(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {"$format": "yaml"}
+        )
+        assert status == 400
+
+    def test_format_param_not_treated_as_filter(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, body = handler.handle(
+            "GET", "/odata/customer", {"$format": "json", "$top": "1"}
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert len(data["value"]) == 1

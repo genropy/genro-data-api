@@ -26,6 +26,8 @@ _JSON_CT = "application/json;charset=UTF-8"
 _XML_CT = "application/xml;charset=UTF-8"
 _TEXT_CT = "text/plain"
 
+_ODATA_VERSION = "4.0"
+
 
 def _json_default(obj: object) -> str | float:
     """JSON serializer for types not handled by stdlib json."""
@@ -65,6 +67,7 @@ class ODataRequestHandler:
         method: str,
         path: str,
         query_params: dict[str, str],
+        request_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], str]:
         """Dispatch an HTTP request and return (status, headers, body).
 
@@ -72,6 +75,8 @@ class ODataRequestHandler:
             method: HTTP method string (e.g. "GET", "POST").
             path: Request path (e.g. "/odata/customer?..." — without query string).
             query_params: Parsed query parameters as a flat string dict.
+            request_headers: Incoming HTTP headers (case-insensitive access via
+                normalized lowercase keys when read through :meth:`_get_header`).
 
         Returns:
             Tuple of (status_code, headers_dict, body_string).
@@ -79,14 +84,31 @@ class ODataRequestHandler:
         if method not in ("GET", "HEAD"):
             return self._error(405, "Method Not Allowed", {"Allow": "GET"})
 
+        version_err = self._check_odata_version(request_headers)
+        if version_err is not None:
+            return version_err
+
+        format_override = query_params.get("$format")
+        if format_override is not None:
+            query_params = {k: v for k, v in query_params.items() if k != "$format"}
+            fmt = format_override.lower()
+            if fmt not in ("json", "xml"):
+                return self._error(400, f"Unsupported $format: {format_override!r}")
+
         relative = self._strip_root(path)
         if relative is None:
             return self._error(404, "Not Found")
 
         if relative in ("", "/"):
+            if format_override == "xml":
+                return self._error(406, "XML format not supported for service document")
             return self._handle_service_document()
 
         if relative == "/$metadata":
+            if format_override == "json":
+                return self._error(
+                    406, "JSON CSDL not supported on $metadata; use Accept: application/xml"
+                )
             return self._handle_metadata()
 
         m = _ENTITY_PATH_RE.match(relative)
@@ -100,11 +122,49 @@ class ODataRequestHandler:
         if not self._entity_exists(entity_name):
             return self._error(404, f"Entity set {entity_name!r} not found")
 
+        if format_override == "xml":
+            return self._error(406, "XML format not supported for this resource")
+
         if count_suffix == "/$count":
             return self._handle_count(entity_name, query_params)
         if key_str is not None:
             return self._handle_single(entity_name, key_str)
         return self._handle_collection(entity_name, query_params)
+
+    @staticmethod
+    def _get_header(headers: dict[str, str] | None, name: str) -> str | None:
+        if not headers:
+            return None
+        target = name.lower()
+        for key, value in headers.items():
+            if key.lower() == target:
+                return value
+        return None
+
+    def _check_odata_version(
+        self, headers: dict[str, str] | None
+    ) -> tuple[int, dict[str, str], str] | None:
+        """Reject clients declaring OData-MaxVersion below 4.0.
+
+        Returns an error tuple to short-circuit the request, or None to proceed.
+        """
+        max_ver = self._get_header(headers, "OData-MaxVersion")
+        if max_ver is None:
+            return None
+        try:
+            major = int(max_ver.split(".", 1)[0])
+        except (AttributeError, ValueError):
+            return self._error(400, f"Invalid OData-MaxVersion: {max_ver!r}")
+        if major < 4:
+            return self._error(
+                400,
+                f"OData v4 required; client declared OData-MaxVersion: {max_ver!r}",
+            )
+        return None
+
+    def _base_headers(self, content_type: str) -> dict[str, str]:
+        """Return the set of headers emitted on every response."""
+        return {"Content-Type": content_type, "OData-Version": _ODATA_VERSION}
 
     def _strip_root(self, path: str) -> str | None:
         if not path.startswith(self._service_root):
@@ -129,11 +189,11 @@ class ODataRequestHandler:
             "@odata.context": f"{self._service_root}/$metadata",
             "value": value,
         })
-        return 200, {"Content-Type": _JSON_CT}, body
+        return 200, self._base_headers(_JSON_CT), body
 
     def _handle_metadata(self) -> tuple[int, dict[str, str], str]:
         xml_str = self._csdl_renderer.render(self._backend)
-        return 200, {"Content-Type": _XML_CT}, xml_str
+        return 200, self._base_headers(_XML_CT), xml_str
 
     def _handle_collection(
         self, entity_name: str, query_params: dict[str, str]
@@ -147,7 +207,7 @@ class ODataRequestHandler:
         payload = self._formatter.format_collection(
             entity_name, result, self._service_root, opts.skip, opts.top
         )
-        return 200, {"Content-Type": _JSON_CT}, _dumps(payload)
+        return 200, self._base_headers(_JSON_CT), _dumps(payload)
 
     def _handle_single(
         self, entity_name: str, key_str: str
@@ -157,7 +217,7 @@ class ODataRequestHandler:
         if record is None:
             return self._error(404, f"{entity_name}({key_str!r}) not found")
         payload = self._formatter.format_entity(entity_name, record, self._service_root)
-        return 200, {"Content-Type": _JSON_CT}, _dumps(payload)
+        return 200, self._base_headers(_JSON_CT), _dumps(payload)
 
     def _handle_count(
         self, entity_name: str, query_params: dict[str, str]
@@ -172,7 +232,7 @@ class ODataRequestHandler:
         opts.skip = None
         result = self._backend.query(entity_name, opts)
         count = result.total_count if result.total_count is not None else len(result.records)
-        return 200, {"Content-Type": _TEXT_CT}, str(count)
+        return 200, self._base_headers(_TEXT_CT), str(count)
 
     def _build_query_options(
         self, entity_name: str, params: dict[str, str]
@@ -243,7 +303,7 @@ class ODataRequestHandler:
         extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], str]:
         body = _dumps({"error": {"code": str(status), "message": message}})
-        headers: dict[str, str] = {"Content-Type": _JSON_CT}
+        headers = self._base_headers(_JSON_CT)
         if extra_headers:
             headers.update(extra_headers)
         return status, headers, body
