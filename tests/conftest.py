@@ -36,28 +36,59 @@ class MockBackend:
 
     def entity_sets(self) -> list[dict[str, Any]]:
         return [
-            {"name": "customer", "title": "Customers"},
-            {"name": "order", "title": "Orders"},
+            {
+                "name": "customer",
+                "title": "Customers",
+                "description": "Accounts that can place orders",
+            },
+            {"name": "order", "title": "Orders", "description": ""},
         ]
 
     def entity_metadata(self, entity_name: str) -> dict[str, Any]:
         if entity_name == "customer":
             return {
                 "name": "customer",
+                "label": "Customer",
+                "description": "An account that can place orders",
                 "key": ["id"],
                 "properties": [
-                    {"name": "id", "type": "I", "nullable": False},
-                    {"name": "name", "type": "A", "nullable": True, "maxLength": 100},
+                    {
+                        "name": "id",
+                        "type": "I",
+                        "nullable": False,
+                        "label": "Identifier",
+                    },
+                    {
+                        "name": "name",
+                        "type": "A",
+                        "nullable": True,
+                        "maxLength": 100,
+                        "label": "Company name",
+                        "description": "Legal business name",
+                    },
                     {"name": "country", "type": "A", "nullable": True, "maxLength": 2},
                     {"name": "active", "type": "B", "nullable": True},
+                    {
+                        "name": "orders_count",
+                        "type": "I",
+                        "nullable": True,
+                        "computed": True,
+                        "label": "Order count",
+                    },
                 ],
                 "navigation": [
-                    {"name": "Orders", "target": "order", "collection": True},
+                    {
+                        "name": "Orders",
+                        "target": "order",
+                        "collection": True,
+                        "label": "Customer orders",
+                    },
                 ],
             }
         if entity_name == "order":
             return {
                 "name": "order",
+                "label": "Order",
                 "key": ["id"],
                 "properties": [
                     {"name": "id", "type": "I", "nullable": False},
