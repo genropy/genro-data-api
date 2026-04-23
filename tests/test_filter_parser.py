@@ -11,6 +11,7 @@ from genro_data_api.odata.filter_parser import (
     FunctionCallNode,
     FunctionNode,
     InNode,
+    LambdaNode,
     LogicalNode,
     ODataFilterParser,
 )
@@ -351,3 +352,77 @@ class TestBooleanFunctionsStillWork:
         node = parser.parse("startswith(name, 'A')")
         assert isinstance(node, FunctionNode)
         assert node.name == "startswith"
+
+
+class TestLambdaQuantifiers:
+    def test_any_with_simple_body(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("invoices/any(f: f/total gt 1000)")
+        assert isinstance(node, LambdaNode)
+        assert node.quantifier == "any"
+        assert node.path == "@invoices"
+        assert node.variable == "f"
+        body = node.body
+        assert isinstance(body, ComparisonNode)
+        assert body.field == "$total"
+        assert body.value == 1000
+
+    def test_all_with_boolean_body(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("invoices/all(f: f/paid eq true)")
+        assert isinstance(node, LambdaNode)
+        assert node.quantifier == "all"
+        assert node.path == "@invoices"
+
+    def test_lambda_inside_logical(self, parser: ODataFilterParser) -> None:
+        node = parser.parse(
+            "country eq 'IT' and invoices/any(f: f/total gt 500)"
+        )
+        assert isinstance(node, LogicalNode)
+        assert node.op == "and"
+        assert isinstance(node.children[1], LambdaNode)
+
+    def test_lambda_with_scalar_function_in_body(
+        self, parser: ODataFilterParser
+    ) -> None:
+        node = parser.parse("invoices/any(f: year(f/date) eq 2024)")
+        assert isinstance(node, LambdaNode)
+        inner = node.body
+        assert isinstance(inner, ComparisonNode)
+        assert isinstance(inner.field, FunctionCallNode)
+        assert inner.field.name == "year"
+        # The bound variable is stripped: f/date becomes $date of the related table.
+        assert inner.field.args == ["$date"]
+
+    def test_nested_lambda(self, parser: ODataFilterParser) -> None:
+        node = parser.parse(
+            "customers/all(c: c/invoices/any(f: f/total gt 1000))"
+        )
+        assert isinstance(node, LambdaNode)
+        assert node.quantifier == "all"
+        assert node.path == "@customers"
+        assert node.variable == "c"
+        inner = node.body
+        assert isinstance(inner, LambdaNode)
+        assert inner.quantifier == "any"
+        assert inner.path == "@invoices"
+        assert inner.variable == "f"
+
+    def test_lambda_variable_as_standalone_path_raises(
+        self, parser: ODataFilterParser
+    ) -> None:
+        with pytest.raises(ValueError):
+            parser.parse("invoices/any(f: f/any(g: g/x eq 1))")
+
+    def test_not_on_lambda(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("not invoices/any(f: f/total gt 1000)")
+        assert isinstance(node, LogicalNode)
+        assert node.op == "not"
+        assert isinstance(node.children[0], LambdaNode)
+
+    def test_to_dict_roundtrip(self, parser: ODataFilterParser) -> None:
+        node = parser.parse("orders/any(o: o/amount gt 100)")
+        d = node.to_dict()
+        assert d["type"] == "lambda"
+        assert d["quantifier"] == "any"
+        assert d["path"] == "@orders"
+        assert d["variable"] == "o"
+        assert d["body"]["type"] == "comparison"

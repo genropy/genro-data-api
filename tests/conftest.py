@@ -15,6 +15,7 @@ from genro_data_api.odata.filter_parser import (
     FunctionCallNode,
     FunctionNode,
     InNode,
+    LambdaNode,
     LogicalNode,
     ODataFilterParser,
 )
@@ -112,7 +113,9 @@ class MockBackend:
         if options.filter_expr:
             try:
                 node = self._filter_parser.parse(options.filter_expr)
-                records = [r for r in records if self._eval_node(node, r)]
+                records = [
+                    r for r in records if self._eval_node(node, r, entity_name)
+                ]
             except ValueError:
                 pass  # return unfiltered on parse failure
 
@@ -150,15 +153,42 @@ class MockBackend:
                 return dict(record)
         return None
 
-    def _eval_node(self, node: FilterNode, record: dict[str, Any]) -> bool:
+    # Navigation map: (source_record_entity, relation_@path) -> (target_entity, parent_fk, child_fk)
+    _NAV_MAP: dict[tuple[str, str], tuple[str, str, str]] = {
+        ("customer", "@Orders"): ("order", "id", "customer_id"),
+    }
+
+    def _eval_node(
+        self, node: FilterNode, record: dict[str, Any], entity: str = "customer"
+    ) -> bool:
         if isinstance(node, ComparisonNode):
             return self._eval_comparison(node, record)
         if isinstance(node, InNode):
             return self._eval_in(node, record)
         if isinstance(node, LogicalNode):
-            return self._eval_logical(node, record)
+            return self._eval_logical(node, record, entity)
         if isinstance(node, FunctionNode):
             return self._eval_function(node, record)
+        if isinstance(node, LambdaNode):
+            return self._eval_lambda(node, record, entity)
+        return False
+
+    def _eval_lambda(
+        self, node: LambdaNode, record: dict[str, Any], entity: str
+    ) -> bool:
+        key = (entity, node.path)
+        if key not in self._NAV_MAP:
+            raise ValueError(f"Unknown navigation {node.path!r} on {entity!r}")
+        target_entity, parent_fk, child_fk = self._NAV_MAP[key]
+        parent_val = record.get(parent_fk)
+        data_map = {"customer": self._customers, "order": self._orders}
+        related = [
+            r for r in data_map[target_entity] if r.get(child_fk) == parent_val
+        ]
+        if node.quantifier == "any":
+            return any(self._eval_node(node.body, r, target_entity) for r in related)
+        if node.quantifier == "all":
+            return all(self._eval_node(node.body, r, target_entity) for r in related)
         return False
 
     def _eval_expr(self, expr: Any, record: dict[str, Any]) -> Any:
@@ -235,13 +265,15 @@ class MockBackend:
         field_val = self._eval_expr(node.field, record)
         return field_val in node.values
 
-    def _eval_logical(self, node: LogicalNode, record: dict[str, Any]) -> bool:
+    def _eval_logical(
+        self, node: LogicalNode, record: dict[str, Any], entity: str
+    ) -> bool:
         if node.op == "and":
-            return all(self._eval_node(c, record) for c in node.children)
+            return all(self._eval_node(c, record, entity) for c in node.children)
         if node.op == "or":
-            return any(self._eval_node(c, record) for c in node.children)
+            return any(self._eval_node(c, record, entity) for c in node.children)
         if node.op == "not":
-            return not self._eval_node(node.children[0], record)
+            return not self._eval_node(node.children[0], record, entity)
         return False
 
     def _eval_function(self, node: FunctionNode, record: dict[str, Any]) -> bool:

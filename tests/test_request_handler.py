@@ -176,6 +176,50 @@ class TestCollectionEndpoint:
         names = sorted(r["name"] for r in data["value"])
         assert names == ["Alice Corp", "Charlie GmbH"]
 
+    def test_filter_lambda_any(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$filter": "Orders/any(o: o/amount gt 2000)"},
+        )
+        data = json.loads(body)
+        # Bob has order 103 with amount 3200; Alice has no order > 2000
+        # (her max is 1500).
+        names = sorted(r["name"] for r in data["value"])
+        assert names == ["Bob Ltd"]
+
+    def test_filter_lambda_all(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$filter": "Orders/all(o: o/status eq 'delivered')"},
+        )
+        data = json.loads(body)
+        # Alice has one pending order → excluded.
+        # Bob has only delivered orders → included.
+        # Charlie has no orders → vacuously included.
+        names = sorted(r["name"] for r in data["value"])
+        assert names == ["Bob Ltd", "Charlie GmbH"]
+
+    def test_filter_lambda_combined(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$filter": "active eq true and Orders/any(o: o/amount gt 2000)"},
+        )
+        data = json.loads(body)
+        assert [r["name"] for r in data["value"]] == ["Bob Ltd"]
+
+    def test_filter_not_any(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$filter": "not Orders/any(o: o/amount gt 2000)"},
+        )
+        data = json.loads(body)
+        names = sorted(r["name"] for r in data["value"])
+        assert names == ["Alice Corp", "Charlie GmbH"]
+
     def test_orderby_asc(self, handler: ODataRequestHandler) -> None:
         _, _, body = handler.handle("GET", "/odata/customer", {"$orderby": "name asc"})
         data = json.loads(body)

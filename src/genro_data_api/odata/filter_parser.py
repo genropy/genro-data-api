@@ -134,6 +134,33 @@ class FunctionNode(FilterNode):
         }
 
 
+@dataclass
+class LambdaNode(FilterNode):
+    """A quantifier over a navigation collection: any() or all().
+
+    ``path`` is the GenroPy-style navigation prefix (e.g. ``@invoices``)
+    describing the related collection. ``variable`` is the user-chosen
+    bound name (e.g. ``f``) used inside the body to refer to a row of
+    that collection. ``body`` is the inner filter expression, with
+    references to the bound variable already rewritten so that a plain
+    ``$column`` denotes a column of the related table.
+    """
+
+    quantifier: str  # "any" or "all"
+    path: str
+    variable: str
+    body: FilterNode
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": "lambda",
+            "quantifier": self.quantifier,
+            "path": self.path,
+            "variable": self.variable,
+            "body": self.body.to_dict(),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -166,6 +193,7 @@ class ODataFilterParser:
     def __init__(self) -> None:
         self._tokens: list[str] = []
         self._pos: int = 0
+        self._lambda_var: str = ""
 
     def parse(self, filter_string: str) -> FilterNode:
         """Parse an OData $filter string into a FilterNode tree."""
@@ -207,7 +235,7 @@ class ODataFilterParser:
                         j += 1
                 tokens.append(text[i:j])
                 i = j
-            elif ch in "(),":
+            elif ch in "(),:":
                 tokens.append(ch)
                 i += 1
             elif ch.isdigit() or (ch == "-" and i + 1 < length and text[i + 1].isdigit()):
@@ -249,16 +277,22 @@ class ODataFilterParser:
             raise ValueError(f"Expected {expected!r}, got {tok!r}")
         return tok
 
-    @staticmethod
-    def _field_ref(token: str) -> str:
+    def _field_ref(self, token: str) -> str:
         """Convert a raw identifier token into a GenroPy field reference.
 
         A plain column name ``name`` becomes ``$name``; a navigation path
         such as ``cliente_id/descr`` becomes ``@cliente_id.descr`` to match
-        GenroPy's query syntax for following relationships.
+        GenroPy's query syntax for following relationships. Inside a lambda
+        body, the bound variable (e.g. ``f`` in ``any(f: f/importo gt 0)``)
+        is stripped so ``f/importo`` resolves to ``$importo`` of the related
+        table.
         """
+        if self._lambda_var and token.startswith(self._lambda_var + "/"):
+            token = token[len(self._lambda_var) + 1 :]
         if "/" in token:
             return "@" + token.replace("/", ".")
+        if not token:
+            raise ValueError("Empty field reference")
         return "$" + token
 
     def _parse_or(self) -> FilterNode:
@@ -297,7 +331,60 @@ class ODataFilterParser:
             return node
         if tok in self._BOOLEAN_FUNCTIONS:
             return self._parse_boolean_function()
+        if self._is_lambda_head(tok):
+            return self._parse_lambda()
         return self._parse_predicate()
+
+    # ------------------------------------------------------------------
+    # Lambda (any / all) predicates
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_lambda_head(tok: str) -> bool:
+        """Recognize ``<nav>/any`` and ``<nav>/all`` prefix tokens."""
+        if "/" not in tok:
+            return False
+        tail = tok.rsplit("/", 1)[1]
+        return tail in ("any", "all")
+
+    def _parse_lambda(self) -> LambdaNode:
+        head = self._consume()
+        nav_path, quantifier = head.rsplit("/", 1)
+        self._expect("(")
+        variable = self._consume()
+        self._expect(":")
+        body = self._parse_or_with_variable(variable)
+        self._expect(")")
+        return LambdaNode(
+            quantifier=quantifier,
+            path=self._lambda_path_ref(nav_path),
+            variable=variable,
+            body=body,
+        )
+
+    def _lambda_path_ref(self, nav_path: str) -> str:
+        """Field ref specialization: lambda paths always denote a relation."""
+        if self._lambda_var and nav_path.startswith(self._lambda_var + "/"):
+            nav_path = nav_path[len(self._lambda_var) + 1 :]
+        elif nav_path == self._lambda_var:
+            raise ValueError(
+                f"Lambda variable {self._lambda_var!r} cannot be used as a "
+                f"navigation path on its own"
+            )
+        if not nav_path:
+            raise ValueError("Empty lambda navigation path")
+        return "@" + nav_path.replace("/", ".")
+
+    def _parse_or_with_variable(self, variable: str) -> FilterNode:
+        """Parse the body of a lambda, rewriting var-scoped field refs."""
+        # Temporarily swap the field-ref rewriter so that ``<var>/col``
+        # becomes ``$col`` and ``<var>/nav/col`` becomes ``@nav.col``.
+        previous_var = self._lambda_var
+        self._lambda_var = variable
+        try:
+            return self._parse_or()
+        finally:
+            self._lambda_var = previous_var
 
     # ------------------------------------------------------------------
     # Predicates: comparisons, in-membership, boolean functions
