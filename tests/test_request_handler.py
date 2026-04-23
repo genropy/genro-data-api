@@ -770,3 +770,165 @@ class TestApplyEndpoint:
             "GET", "/odata/order", {"$apply": "bogus(foo)"}
         )
         assert status == 400
+
+
+class TestSkipToken:
+    def test_next_link_uses_opaque_token(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, _, body = handler.handle(
+            "GET", "/odata/customer", {"$top": "2", "$count": "true"}
+        )
+        data = json.loads(body)
+        assert "@odata.nextLink" in data
+        assert "$skiptoken=" in data["@odata.nextLink"]
+        assert "$top=" not in data["@odata.nextLink"]
+        assert "$skip=" not in data["@odata.nextLink"]
+
+    def test_skiptoken_round_trip(self, handler: ODataRequestHandler) -> None:
+        # First page
+        _, _, body = handler.handle(
+            "GET", "/odata/customer", {"$top": "2", "$count": "true"}
+        )
+        data = json.loads(body)
+        next_link = data["@odata.nextLink"]
+        # Extract the token and replay it as query param (simulating what a
+        # client does when following a nextLink).
+        token = next_link.split("$skiptoken=", 1)[1]
+        status, _, body2 = handler.handle(
+            "GET", "/odata/customer", {"$skiptoken": token}
+        )
+        assert status == 200
+        data2 = json.loads(body2)
+        assert len(data2["value"]) == 1  # Only one customer left after skip=2
+        assert data2["value"][0]["id"] == 3
+
+    def test_skiptoken_preserves_filter_in_url(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$filter": "active eq true", "$top": "1", "$count": "true"},
+        )
+        data = json.loads(body)
+        next_link = data["@odata.nextLink"]
+        assert "$filter=" in next_link
+        assert "$skiptoken=" in next_link
+
+    def test_skiptoken_tampered_filter_rejected(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        # Get a valid token for filter "active eq true"
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$filter": "active eq true", "$top": "1", "$count": "true"},
+        )
+        data = json.loads(body)
+        token = data["@odata.nextLink"].split("$skiptoken=", 1)[1]
+
+        # Now replay the same token with a DIFFERENT filter → must 400
+        status, _, body2 = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$filter": "country eq 'IT'", "$skiptoken": token},
+        )
+        assert status == 400
+        assert "not coherent" in json.loads(body2)["error"]["message"]
+
+    def test_skiptoken_invalid_format_400(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer", {"$skiptoken": "not a valid token !!!"}
+        )
+        assert status == 400
+
+    def test_skiptoken_overrides_inline_top_skip(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, _, body = handler.handle(
+            "GET", "/odata/customer", {"$top": "2", "$count": "true"}
+        )
+        data = json.loads(body)
+        token = data["@odata.nextLink"].split("$skiptoken=", 1)[1]
+        # Even if client also supplies $top/$skip, token wins.
+        status, _, body2 = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$skiptoken": token, "$top": "100", "$skip": "0"},
+        )
+        assert status == 200
+        data2 = json.loads(body2)
+        assert len(data2["value"]) == 1
+
+
+class TestMaxPageSize:
+    def test_prefer_maxpagesize_limits_results(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        # No $top specified; Prefer caps it at 2.
+        _, headers, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {},
+            request_headers={"Prefer": "odata.maxpagesize=2"},
+        )
+        data = json.loads(body)
+        assert len(data["value"]) == 2
+        assert headers.get("Preference-Applied") == "odata.maxpagesize=2"
+
+    def test_prefer_maxpagesize_applies_only_when_smaller(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        # $top=1 is already smaller than maxpagesize=5; Prefer has no effect.
+        _, headers, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$top": "1"},
+            request_headers={"Prefer": "odata.maxpagesize=5"},
+        )
+        data = json.loads(body)
+        assert len(data["value"]) == 1
+        # Preference was not applied because $top was already within bounds.
+        assert "Preference-Applied" not in headers
+
+    def test_prefer_maxpagesize_clamps_big_top(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        # Client asks $top=10 but server caps at 2.
+        _, headers, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$top": "10"},
+            request_headers={"Prefer": "odata.maxpagesize=2"},
+        )
+        data = json.loads(body)
+        assert len(data["value"]) == 2
+        assert headers.get("Preference-Applied") == "odata.maxpagesize=2"
+
+    def test_prefer_maxpagesize_malformed_ignored(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        # Invalid number → treated as no preference.
+        status, headers, _ = handler.handle(
+            "GET",
+            "/odata/customer",
+            {},
+            request_headers={"Prefer": "odata.maxpagesize=abc"},
+        )
+        assert status == 200
+        assert "Preference-Applied" not in headers
+
+    def test_prefer_other_tokens_ignored(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        # Other Prefer tokens do not break the handler.
+        status, _, _ = handler.handle(
+            "GET",
+            "/odata/customer",
+            {},
+            request_headers={"Prefer": "return=representation, wait=10"},
+        )
+        assert status == 200

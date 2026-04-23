@@ -76,13 +76,20 @@ class TestFormatCollection:
     def test_next_link_when_more_pages(
         self, formatter: ODataResponseFormatter, result_with_count: QueryResult
     ) -> None:
-        # top=2, skip=0, total=10 → nextLink at skip=2
+        # top=2, skip=0, total=10 → nextLink points to the next page via
+        # an opaque $skiptoken (offset-based under the hood).
         payload = formatter.format_collection(
             "customer", result_with_count, "/odata", skip=0, top=2
         )
         assert "@odata.nextLink" in payload
-        assert "$top=2" in payload["@odata.nextLink"]
-        assert "$skip=2" in payload["@odata.nextLink"]
+        assert "$skiptoken=" in payload["@odata.nextLink"]
+        # The token encodes skip=2, top=2 so the client round-trips the
+        # right offset on the next request.
+        from genro_data_api.odata.skiptoken import decode
+        token = payload["@odata.nextLink"].split("$skiptoken=", 1)[1]
+        state = decode(token)
+        assert state["skip"] == 2
+        assert state["top"] == 2
 
     def test_no_next_link_on_last_page(
         self, formatter: ODataResponseFormatter, result_with_count: QueryResult

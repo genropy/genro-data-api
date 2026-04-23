@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from genro_data_api.core.backend import DataApiBackend, QueryOptions
+from genro_data_api.odata import skiptoken as skiptoken_module
 from genro_data_api.odata.apply_parser import ODataApplyParser
 from genro_data_api.odata.csdl_renderer import CsdlRenderer
 from genro_data_api.odata.expand_resolver import ExpandResolver
@@ -209,13 +210,16 @@ class ODataRequestHandler:
         if not self._entity_exists(entity_name):
             return self._error(404, f"Entity set {entity_name!r} not found")
 
-        return self._dispatch_steps(steps, query_params, format_override)
+        return self._dispatch_steps(
+            steps, query_params, format_override, request_headers
+        )
 
     def _dispatch_steps(
         self,
         steps: list[dict[str, Any]],
         query_params: dict[str, str],
         format_override: str | None,
+        request_headers: dict[str, str] | None,
     ) -> tuple[int, dict[str, str], str]:
         """Dispatch a parsed path step list to the right handler."""
         entity_name = steps[0]["name"]
@@ -226,7 +230,7 @@ class ODataRequestHandler:
                 return self._error(406, "XML format not supported for this resource")
             if len(steps) == 2:
                 return self._handle_count(entity_name, query_params)
-            return self._handle_collection(entity_name, query_params)
+            return self._handle_collection(entity_name, query_params, request_headers)
 
         if steps[1]["kind"] != "key":
             return self._error(404, "Not Found")
@@ -371,12 +375,21 @@ class ODataRequestHandler:
         return 200, self._base_headers(_XML_CT), xml_str
 
     def _handle_collection(
-        self, entity_name: str, query_params: dict[str, str]
+        self,
+        entity_name: str,
+        query_params: dict[str, str],
+        request_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], str]:
         try:
             opts = self._build_query_options(entity_name, query_params)
         except ValueError as exc:
             return self._error(400, str(exc))
+
+        max_page_size = self._parse_maxpagesize(request_headers)
+        preference_applied = False
+        if max_page_size is not None and (opts.top is None or opts.top > max_page_size):
+            opts.top = max_page_size
+            preference_applied = True
 
         result = self._backend.query(entity_name, opts)
         if opts.apply is not None:
@@ -388,9 +401,41 @@ class ODataRequestHandler:
             )
         else:
             payload = self._formatter.format_collection(
-                entity_name, result, self._service_root, opts.skip, opts.top
+                entity_name,
+                result,
+                self._service_root,
+                opts.skip,
+                opts.top,
+                query_params=query_params,
             )
-        return 200, self._base_headers(_JSON_CT), _dumps(payload)
+        headers = self._base_headers(_JSON_CT)
+        if preference_applied:
+            headers["Preference-Applied"] = f"odata.maxpagesize={max_page_size}"
+        return 200, headers, _dumps(payload)
+
+    def _parse_maxpagesize(
+        self, request_headers: dict[str, str] | None
+    ) -> int | None:
+        """Extract the ``odata.maxpagesize`` value from a Prefer header, if any.
+
+        Ignores malformed values silently — pagination is an optional hint;
+        returning None falls back to the client-supplied ``$top`` (or no
+        limit).
+        """
+        prefer = self._get_header(request_headers, "Prefer")
+        if not prefer:
+            return None
+        for part in prefer.split(","):
+            token = part.strip()
+            if token.lower().startswith("odata.maxpagesize="):
+                _, _, value = token.partition("=")
+                try:
+                    size = int(value.strip())
+                    if size > 0:
+                        return size
+                except ValueError:
+                    return None
+        return None
 
     def _handle_single(
         self, entity_name: str, key: Any
@@ -559,17 +604,30 @@ class ODataRequestHandler:
         if "$orderby" in params:
             opts.order_by = self._parse_orderby(params["$orderby"])
 
-        if "$top" in params:
-            try:
-                opts.top = int(params["$top"])
-            except ValueError:
-                raise ValueError("$top must be a non-negative integer") from None
+        # $skiptoken carries the paginator state; when present it supersedes
+        # inline $top/$skip. Reject tokens whose filter_hash does not match
+        # the current query — the client shifted the filter between pages.
+        if "$skiptoken" in params:
+            state = skiptoken_module.decode(params["$skiptoken"])
+            expected_hash = skiptoken_module.filter_hash(params)
+            if state.get("filter_hash") != expected_hash:
+                raise ValueError(
+                    "$skiptoken is not coherent with current query parameters"
+                )
+            opts.top = state.get("top")
+            opts.skip = state.get("skip")
+        else:
+            if "$top" in params:
+                try:
+                    opts.top = int(params["$top"])
+                except ValueError:
+                    raise ValueError("$top must be a non-negative integer") from None
 
-        if "$skip" in params:
-            try:
-                opts.skip = int(params["$skip"])
-            except ValueError:
-                raise ValueError("$skip must be a non-negative integer") from None
+            if "$skip" in params:
+                try:
+                    opts.skip = int(params["$skip"])
+                except ValueError:
+                    raise ValueError("$skip must be a non-negative integer") from None
 
         if "$count" in params:
             opts.count = params["$count"].lower() == "true"

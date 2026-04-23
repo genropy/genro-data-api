@@ -9,9 +9,19 @@ including @odata.context, @odata.count, and @odata.nextLink annotations.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from genro_data_api.core.backend import DataApiBackend, QueryResult
 from genro_data_api.core.type_map import get_edm_type
+from genro_data_api.odata import skiptoken as skiptoken_module
+
+
+def _encode_query_component(value: str) -> str:
+    """Percent-encode a query-string key or value, preserving typical OData chars."""
+    # Keep ``$`` unescaped — every OData system param starts with it and
+    # clients / URL tooling expect it verbatim. Everything else that would
+    # break query parsing (``&``, ``=``, ``#``, space, etc.) gets encoded.
+    return quote(value, safe="$=,()'/: ")
 
 
 class ODataResponseFormatter:
@@ -24,6 +34,7 @@ class ODataResponseFormatter:
         context_url: str,
         skip: int | None = None,
         top: int | None = None,
+        query_params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Format a collection query result as OData v4 JSON.
 
@@ -33,6 +44,9 @@ class ODataResponseFormatter:
             context_url: OData service root URL (e.g. "/odata").
             skip: Number of records skipped (used for nextLink computation).
             top: Page size requested (used for nextLink computation).
+            query_params: Raw query parameters from the current request;
+                needed to preserve $filter/$orderby in ``nextLink`` and to
+                compute a stable ``filter_hash`` for the opaque skiptoken.
 
         Returns:
             Dict ready for JSON serialization, with @odata annotations.
@@ -44,7 +58,9 @@ class ODataResponseFormatter:
         if result.total_count is not None:
             payload["@odata.count"] = result.total_count
 
-        next_link = self._compute_next_link(entity_name, context_url, result, skip, top)
+        next_link = self._compute_next_link(
+            entity_name, context_url, result, skip, top, query_params
+        )
         if next_link is not None:
             payload["@odata.nextLink"] = next_link
 
@@ -150,6 +166,7 @@ class ODataResponseFormatter:
         result: QueryResult,
         skip: int | None,
         top: int | None,
+        query_params: dict[str, str] | None = None,
     ) -> str | None:
         if top is None or result.total_count is None:
             return None
@@ -157,4 +174,25 @@ class ODataResponseFormatter:
         if current_skip + top >= result.total_count:
             return None
         next_skip = current_skip + top
-        return f"{context_url}/{entity_name}?$top={top}&$skip={next_skip}"
+
+        params = query_params or {}
+        token = skiptoken_module.encode({
+            "skip": next_skip,
+            "top": top,
+            "filter_hash": skiptoken_module.filter_hash(params),
+        })
+
+        # Preserve the filter-shaping parameters in the next link so the URL
+        # stays self-describing. Pagination params ($top/$skip/$skiptoken)
+        # are intentionally dropped — they live inside the opaque token.
+        preserved: list[tuple[str, str]] = []
+        for key in ("$filter", "$orderby", "$apply", "$select", "$expand"):
+            if key in params:
+                preserved.append((key, params[key]))
+        preserved.append(("$skiptoken", token))
+
+        query_string = "&".join(
+            f"{_encode_query_component(k)}={_encode_query_component(v)}"
+            for k, v in preserved
+        )
+        return f"{context_url}/{entity_name}?{query_string}"
