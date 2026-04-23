@@ -50,6 +50,30 @@ class ODataResponseFormatter:
 
         return payload
 
+    def format_apply_result(
+        self,
+        entity_name: str,
+        result: QueryResult,
+        context_url: str,
+        apply_columns: list[str],
+    ) -> dict[str, Any]:
+        """Format an aggregated $apply result as OData v4 JSON.
+
+        Shape matches the reference Microsoft TripPinRESTierService:
+        ``@odata.context`` carries a projection clause ``#EntitySet(col1,col2)``
+        and each row is tagged with ``@odata.id: null`` to signal that the
+        aggregated row is not an addressable entity.
+        """
+        cols = ",".join(apply_columns)
+        value = [{"@odata.id": None, **record} for record in result.records]
+        payload: dict[str, Any] = {
+            "@odata.context": f"{context_url}/$metadata#{entity_name}({cols})",
+            "value": value,
+        }
+        if result.total_count is not None:
+            payload["@odata.count"] = result.total_count
+        return payload
+
     def format_entity(
         self,
         entity_name: str,

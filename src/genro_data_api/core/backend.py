@@ -14,7 +14,10 @@ types with no external dependencies.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from genro_data_api.odata.apply_parser import ApplyPipeline
 
 
 @runtime_checkable
@@ -107,6 +110,14 @@ class QueryOptions:
 
     expand: dict[str, QueryOptions] | None = None
     """Navigation properties to expand, each with optional nested options."""
+
+    apply: ApplyPipeline | None = None
+    """Parsed $apply pipeline for server-side aggregation.
+
+    When set, the backend must execute the pipeline (filter / groupby /
+    aggregate) and return the aggregated rows. Other options (select,
+    expand) are mutually exclusive with apply and the request handler
+    rejects that combination before the backend sees it."""
 
 
 @dataclass

@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from genro_data_api.core.backend import DataApiBackend, QueryOptions
+from genro_data_api.odata.apply_parser import ODataApplyParser
 from genro_data_api.odata.csdl_renderer import CsdlRenderer
 from genro_data_api.odata.expand_resolver import ExpandResolver
 from genro_data_api.odata.filter_parser import ODataFilterParser
@@ -146,6 +147,7 @@ class ODataRequestHandler:
         self._backend = backend
         self._service_root = service_root.rstrip("/")
         self._filter_parser = ODataFilterParser()
+        self._apply_parser = ODataApplyParser()
         self._expand_resolver = ExpandResolver()
         self._csdl_renderer = CsdlRenderer()
         self._formatter = ODataResponseFormatter()
@@ -377,9 +379,17 @@ class ODataRequestHandler:
             return self._error(400, str(exc))
 
         result = self._backend.query(entity_name, opts)
-        payload = self._formatter.format_collection(
-            entity_name, result, self._service_root, opts.skip, opts.top
-        )
+        if opts.apply is not None:
+            payload = self._formatter.format_apply_result(
+                entity_name,
+                result,
+                self._service_root,
+                opts.apply.result_columns(),
+            )
+        else:
+            payload = self._formatter.format_collection(
+                entity_name, result, self._service_root, opts.skip, opts.top
+            )
         return 200, self._base_headers(_JSON_CT), _dumps(payload)
 
     def _handle_single(
@@ -567,6 +577,13 @@ class ODataRequestHandler:
         if "$expand" in params:
             meta = self._backend.entity_metadata(entity_name)
             opts.expand = self._expand_resolver.resolve(params["$expand"], meta)
+
+        if "$apply" in params:
+            if "$expand" in params:
+                raise ValueError("$apply cannot be combined with $expand")
+            if "$select" in params:
+                raise ValueError("$apply cannot be combined with $select")
+            opts.apply = self._apply_parser.parse(params["$apply"])
 
         return opts
 

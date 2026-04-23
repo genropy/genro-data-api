@@ -26,6 +26,10 @@ _CAPABILITIES_URI = (
     "https://oasis-tcs.github.io/odata-vocabularies/vocabularies/"
     "Org.OData.Capabilities.V1.xml"
 )
+_AGGREGATION_URI = (
+    "https://oasis-tcs.github.io/odata-vocabularies/vocabularies/"
+    "Org.OData.Aggregation.V1.xml"
+)
 
 
 class CsdlRenderer:
@@ -48,6 +52,9 @@ class CsdlRenderer:
         self._add_reference(root, _CORE_URI, "Org.OData.Core.V1", "Core")
         self._add_reference(
             root, _CAPABILITIES_URI, "Org.OData.Capabilities.V1", "Capabilities"
+        )
+        self._add_reference(
+            root, _AGGREGATION_URI, "Org.OData.Aggregation.V1", "Aggregation"
         )
         data_services = ET.SubElement(root, f"{{{_EDMX_NS}}}DataServices")
         schema = ET.SubElement(data_services, f"{{{_EDM_NS}}}Schema", {"Namespace": namespace})
@@ -168,6 +175,29 @@ class CsdlRenderer:
         self._annotate_record(
             es_elem, "Capabilities.CountRestrictions", {"Countable": True}
         )
+        self._annotate_apply_supported(
+            es_elem, ["aggregate", "groupby", "filter"]
+        )
+
+    def _annotate_apply_supported(
+        self, parent: ET.Element, transformations: list[str]
+    ) -> None:
+        """Emit Aggregation.ApplySupported with the list of transformations."""
+        ann = ET.SubElement(
+            parent,
+            f"{{{_EDM_NS}}}Annotation",
+            {"Term": "Aggregation.ApplySupported"},
+        )
+        record = ET.SubElement(ann, f"{{{_EDM_NS}}}Record")
+        prop_val = ET.SubElement(
+            record,
+            f"{{{_EDM_NS}}}PropertyValue",
+            {"Property": "Transformations"},
+        )
+        collection = ET.SubElement(prop_val, f"{{{_EDM_NS}}}Collection")
+        for transformation in transformations:
+            elem = ET.SubElement(collection, f"{{{_EDM_NS}}}String")
+            elem.text = transformation
 
     def _annotate_description(
         self,

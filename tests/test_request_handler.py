@@ -627,3 +627,146 @@ class TestSegmentNavigation:
             "GET", "/odata/customer(1)/name/foo", {}
         )
         assert status == 404
+
+
+class TestApplyEndpoint:
+    def test_aggregate_sum(self, handler: ODataRequestHandler) -> None:
+        status, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {"$apply": "aggregate(amount with sum as Revenue)"},
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert data["@odata.context"].endswith("#order(Revenue)")
+        assert len(data["value"]) == 1
+        row = data["value"][0]
+        assert row["@odata.id"] is None
+        assert row["Revenue"] == 1500.0 + 250.5 + 3200.0
+
+    def test_aggregate_count(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {"$apply": "aggregate($count as Total)"},
+        )
+        data = json.loads(body)
+        assert data["value"][0]["Total"] == 3
+
+    def test_groupby_with_count(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {"$apply": "groupby((customer_id), aggregate($count as N))"},
+        )
+        data = json.loads(body)
+        grouped = {r["customer_id"]: r["N"] for r in data["value"]}
+        assert grouped == {1: 2, 2: 1}
+
+    def test_groupby_with_sum(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {
+                "$apply": "groupby((customer_id), aggregate(amount with sum as Total))"
+            },
+        )
+        data = json.loads(body)
+        sums = {r["customer_id"]: r["Total"] for r in data["value"]}
+        assert sums == {1: 1750.5, 2: 3200.0}
+
+    def test_filter_then_groupby(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {
+                "$apply": (
+                    "filter(status eq 'delivered')/"
+                    "groupby((customer_id), aggregate(amount with sum as Total))"
+                )
+            },
+        )
+        data = json.loads(body)
+        sums = {r["customer_id"]: r["Total"] for r in data["value"]}
+        # Alice has only order 101 delivered; Bob has 103.
+        assert sums == {1: 1500.0, 2: 3200.0}
+
+    def test_context_includes_columns(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {
+                "$apply": "groupby((customer_id), aggregate(amount with sum as Total))"
+            },
+        )
+        data = json.loads(body)
+        assert data["@odata.context"].endswith("#order(customer_id,Total)")
+
+    def test_odata_id_null_on_rows(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {"$apply": "groupby((customer_id))"},
+        )
+        data = json.loads(body)
+        for row in data["value"]:
+            assert row["@odata.id"] is None
+
+    def test_orderby_on_alias(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {
+                "$apply": "groupby((customer_id), aggregate(amount with sum as Total))",
+                "$orderby": "Total desc",
+            },
+        )
+        data = json.loads(body)
+        totals = [r["Total"] for r in data["value"]]
+        assert totals == sorted(totals, reverse=True)
+
+    def test_top_with_apply(self, handler: ODataRequestHandler) -> None:
+        _, _, body = handler.handle(
+            "GET",
+            "/odata/order",
+            {
+                "$apply": "groupby((customer_id), aggregate($count as N))",
+                "$top": "1",
+            },
+        )
+        data = json.loads(body)
+        assert len(data["value"]) == 1
+
+    def test_apply_with_expand_400(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$apply": "aggregate($count as N)", "$expand": "Orders"},
+        )
+        assert status == 400
+        assert "$expand" in json.loads(body)["error"]["message"]
+
+    def test_apply_with_select_400(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, body = handler.handle(
+            "GET",
+            "/odata/customer",
+            {"$apply": "aggregate($count as N)", "$select": "id"},
+        )
+        assert status == 400
+        assert "$select" in json.loads(body)["error"]["message"]
+
+    def test_apply_invalid_syntax_400(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/order", {"$apply": "bogus(foo)"}
+        )
+        assert status == 400

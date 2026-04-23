@@ -9,6 +9,11 @@ from typing import Any
 import pytest
 
 from genro_data_api.core.backend import QueryOptions, QueryResult
+from genro_data_api.odata.apply_parser import (
+    AggregateStep,
+    FilterStep,
+    GroupByStep,
+)
 from genro_data_api.odata.filter_parser import (
     ComparisonNode,
     FilterNode,
@@ -111,6 +116,9 @@ class MockBackend:
         raise KeyError(f"Unknown entity: {entity_name!r}")
 
     def query(self, entity_name: str, options: QueryOptions) -> QueryResult:
+        if options.apply is not None:
+            return self._execute_apply(entity_name, options)
+
         data_map: dict[str, list[dict[str, Any]]] = {
             "customer": self._customers,
             "order": self._orders,
@@ -248,6 +256,90 @@ class MockBackend:
             records = records[: options.top]
 
         return QueryResult(records=records, total_count=total)
+
+    def _execute_apply(
+        self, entity_name: str, options: QueryOptions
+    ) -> QueryResult:
+        """In-memory execution of the $apply pipeline for tests."""
+        data_map: dict[str, list[dict[str, Any]]] = {
+            "customer": self._customers,
+            "order": self._orders,
+        }
+        rows = [dict(r) for r in data_map.get(entity_name, [])]
+
+        assert options.apply is not None  # guaranteed by caller
+        for step in options.apply.steps:
+            if isinstance(step, FilterStep):
+                node = self._filter_parser.parse(step.filter_expr)
+                rows = [r for r in rows if self._eval_node(node, r, entity_name)]
+            elif isinstance(step, GroupByStep):
+                rows = self._apply_groupby(rows, step)
+            elif isinstance(step, AggregateStep):
+                rows = [self._apply_aggregate_row(rows, step.items)]
+            else:  # pragma: no cover — parser rejects anything else
+                raise ValueError(f"Unsupported apply step: {type(step).__name__}")
+
+        if options.filter_expr:
+            node = self._filter_parser.parse(options.filter_expr)
+            rows = [r for r in rows if self._eval_node(node, r, entity_name)]
+
+        if options.order_by:
+            for col, direction in reversed(options.order_by):
+                rows.sort(
+                    key=lambda r, c=col: (r.get(c) is None, r.get(c, "")),  # type: ignore[misc]
+                    reverse=(direction == "desc"),
+                )
+
+        total = len(rows) if options.count else None
+
+        if options.skip:
+            rows = rows[options.skip:]
+        if options.top is not None:
+            rows = rows[: options.top]
+
+        return QueryResult(records=rows, total_count=total)
+
+    @staticmethod
+    def _apply_aggregate_row(
+        records: list[dict[str, Any]], items: list[Any]
+    ) -> dict[str, Any]:
+        row: dict[str, Any] = {}
+        for item in items:
+            if item.method == "count":
+                row[item.alias] = len(records)
+            elif item.method == "sum":
+                row[item.alias] = sum(
+                    (r.get(item.column) or 0) for r in records
+                )
+            elif item.method == "average":
+                vals = [r.get(item.column) for r in records if r.get(item.column) is not None]
+                row[item.alias] = (sum(vals) / len(vals)) if vals else None
+            elif item.method == "min":
+                vals = [r.get(item.column) for r in records if r.get(item.column) is not None]
+                row[item.alias] = min(vals) if vals else None
+            elif item.method == "max":
+                vals = [r.get(item.column) for r in records if r.get(item.column) is not None]
+                row[item.alias] = max(vals) if vals else None
+            elif item.method == "countdistinct":
+                row[item.alias] = len({r.get(item.column) for r in records})
+            else:
+                raise ValueError(f"Unsupported aggregation: {item.method!r}")
+        return row
+
+    def _apply_groupby(
+        self, records: list[dict[str, Any]], step: GroupByStep
+    ) -> list[dict[str, Any]]:
+        groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        for r in records:
+            key = tuple(r.get(k) for k in step.keys)
+            groups.setdefault(key, []).append(r)
+        out: list[dict[str, Any]] = []
+        for key, members in groups.items():
+            row: dict[str, Any] = dict(zip(step.keys, key, strict=True))
+            if step.aggregate is not None:
+                row.update(self._apply_aggregate_row(members, step.aggregate.items))
+            out.append(row)
+        return out
 
     def _eval_node(
         self, node: FilterNode, record: dict[str, Any], entity: str = "customer"
