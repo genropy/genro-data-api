@@ -99,7 +99,14 @@ class MockBackend:
                     {"name": "amount", "type": "N", "nullable": True, "precision": 12, "scale": 2},
                     {"name": "status", "type": "A", "nullable": True, "maxLength": 20},
                 ],
-                "navigation": [],
+                "navigation": [
+                    {
+                        "name": "Customer",
+                        "target": "customer",
+                        "collection": False,
+                        "label": "Owning customer",
+                    },
+                ],
             }
         raise KeyError(f"Unknown entity: {entity_name!r}")
 
@@ -156,7 +163,91 @@ class MockBackend:
     # Navigation map: (source_record_entity, relation_@path) -> (target_entity, parent_fk, child_fk)
     _NAV_MAP: dict[tuple[str, str], tuple[str, str, str]] = {
         ("customer", "@Orders"): ("order", "id", "customer_id"),
+        ("order", "@Customer"): ("customer", "customer_id", "id"),
     }
+
+    # Segment-navigation map: (source_entity, nav_name) ->
+    # (target_entity, kind, parent_prop_on_source, child_prop_on_target)
+    # kind: 'single' (one target) or 'collection' (many targets).
+    _SEG_NAV: dict[tuple[str, str], tuple[str, str, str, str]] = {
+        ("customer", "Orders"): ("order", "collection", "id", "customer_id"),
+        ("order", "Customer"): ("customer", "single", "customer_id", "id"),
+    }
+
+    def _data_for(self, entity: str) -> list[dict[str, Any]]:
+        data_map = {"customer": self._customers, "order": self._orders}
+        return data_map.get(entity, [])
+
+    def navigate_single(
+        self, entity_name: str, key: Any, rel: str
+    ) -> dict[str, Any] | None:
+        """Resolve ``/Entity(key)/navSingle`` for the mock."""
+        info = self._SEG_NAV.get((entity_name, rel))
+        if info is None or info[1] != "single":
+            return None
+        target_entity, _, parent_prop, child_prop = info
+        source = self.get_entity(entity_name, key)
+        if source is None:
+            return None
+        parent_val = source.get(parent_prop)
+        if parent_val is None:
+            return None
+        for record in self._data_for(target_entity):
+            if record.get(child_prop) == parent_val:
+                return {
+                    "entity": target_entity,
+                    "key": record.get(child_prop),
+                    "record": dict(record),
+                }
+        return None
+
+    def navigate_collection(
+        self,
+        entity_name: str,
+        key: Any,
+        rel: str,
+        options: QueryOptions,
+    ) -> QueryResult:
+        """Resolve ``/Entity(key)/navMany`` with the usual query options."""
+        info = self._SEG_NAV.get((entity_name, rel))
+        if info is None or info[1] != "collection":
+            raise ValueError(f"Unknown navigation {rel!r} on {entity_name!r}")
+        target_entity, _, parent_prop, child_prop = info
+        source = self.get_entity(entity_name, key)
+        if source is None:
+            return QueryResult(records=[], total_count=0 if options.count else None)
+        parent_val = source.get(parent_prop)
+
+        records = [
+            dict(r) for r in self._data_for(target_entity)
+            if r.get(child_prop) == parent_val
+        ]
+
+        if options.filter_expr:
+            try:
+                node = self._filter_parser.parse(options.filter_expr)
+                records = [r for r in records if self._eval_node(node, r, target_entity)]
+            except ValueError:
+                pass
+
+        if options.select:
+            records = [{k: r[k] for k in options.select if k in r} for r in records]
+
+        if options.order_by:
+            for field_name, direction in reversed(options.order_by):
+                records.sort(
+                    key=lambda r, f=field_name: (r.get(f) is None, r.get(f, "")),  # type: ignore[misc]
+                    reverse=(direction == "desc"),
+                )
+
+        total = len(records) if options.count else None
+
+        if options.skip:
+            records = records[options.skip:]
+        if options.top is not None:
+            records = records[: options.top]
+
+        return QueryResult(records=records, total_count=total)
 
     def _eval_node(
         self, node: FilterNode, record: dict[str, Any], entity: str = "customer"

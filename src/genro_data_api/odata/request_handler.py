@@ -11,16 +11,14 @@ from __future__ import annotations
 
 import datetime
 import json
-import re
 from decimal import Decimal
+from typing import Any
 
 from genro_data_api.core.backend import DataApiBackend, QueryOptions
 from genro_data_api.odata.csdl_renderer import CsdlRenderer
 from genro_data_api.odata.expand_resolver import ExpandResolver
 from genro_data_api.odata.filter_parser import ODataFilterParser
 from genro_data_api.odata.response import ODataResponseFormatter
-
-_ENTITY_PATH_RE = re.compile(r"^/([^/(]+)(?:\(([^)]*)\))?(/\$count)?$")
 
 _JSON_CT = "application/json;charset=UTF-8"
 _XML_CT = "application/xml;charset=UTF-8"
@@ -43,6 +41,96 @@ def _json_default(obj: object) -> str | float:
 def _dumps(obj: object) -> str:
     """JSON serialize with OData-safe type handling."""
     return json.dumps(obj, default=_json_default, ensure_ascii=False)
+
+
+def _parse_path(relative: str) -> list[dict[str, Any]] | None:
+    """Split an entity path into typed steps.
+
+    Accepts paths shaped like::
+
+        /Entity
+        /Entity(key)
+        /Entity(key)/segment
+        /Entity(key)/segment/$value
+        /Entity(key)/rel/$count
+        /Entity/$count
+
+    The returned list is empty on the root path ("/" or ""). ``None`` is
+    returned for malformed paths (unbalanced parens, empty segments,
+    invalid key formats).
+
+    Step kinds:
+        entity_set  — always the first step; ``name`` carries the name
+        key         — optional second step; ``value`` is int | str
+        segment     — any intermediate or terminal property / navigation
+        value       — ``$value`` terminator (raw content)
+        count       — ``$count`` terminator (plain integer)
+    """
+    if relative in ("", "/"):
+        return []
+    if not relative.startswith("/"):
+        return None
+    raw_segments = relative[1:].split("/")
+    if any(s == "" for s in raw_segments):
+        return None
+
+    steps: list[dict[str, Any]] = []
+    first = raw_segments[0]
+    entity_name, key_literal = _split_key(first)
+    if entity_name is None:
+        return None
+    steps.append({"kind": "entity_set", "name": entity_name})
+    if key_literal is not None:
+        parsed_key = _parse_key_literal(key_literal)
+        if parsed_key is None:
+            return None
+        steps.append({"kind": "key", "value": parsed_key})
+
+    for seg in raw_segments[1:]:
+        if seg == "$value":
+            steps.append({"kind": "value"})
+        elif seg == "$count":
+            steps.append({"kind": "count"})
+        else:
+            if "(" in seg or ")" in seg:
+                return None
+            steps.append({"kind": "segment", "name": seg})
+
+    return steps
+
+
+def _split_key(segment: str) -> tuple[str | None, str | None]:
+    """Split ``Entity`` or ``Entity(key)`` into (name, key_literal_or_None)."""
+    if "(" not in segment:
+        if ")" in segment:
+            return None, None
+        return segment, None
+    if not segment.endswith(")"):
+        return None, None
+    name, _, rest = segment.partition("(")
+    if not name:
+        return None, None
+    key_literal = rest[:-1]
+    if "(" in key_literal or ")" in key_literal:
+        return None, None
+    return name, key_literal
+
+
+def _parse_key_literal(literal: str) -> int | str | None:
+    """Parse a key literal: numeric (``42``) or quoted string (``'ABC'``).
+
+    Returns None for unsupported formats (composite keys, unbalanced quotes,
+    empty literals).
+    """
+    stripped = literal.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("'") and stripped.endswith("'") and len(stripped) >= 2:
+        return stripped[1:-1]
+    try:
+        return int(stripped)
+    except ValueError:
+        return None
 
 
 class ODataRequestHandler:
@@ -111,25 +199,110 @@ class ODataRequestHandler:
                 )
             return self._handle_metadata()
 
-        m = _ENTITY_PATH_RE.match(relative)
-        if not m:
+        steps = _parse_path(relative)
+        if steps is None or not steps:
             return self._error(404, "Not Found")
 
-        entity_name = m.group(1)
-        key_str = m.group(2)
-        count_suffix = m.group(3)
-
+        entity_name = steps[0]["name"]
         if not self._entity_exists(entity_name):
             return self._error(404, f"Entity set {entity_name!r} not found")
+
+        return self._dispatch_steps(steps, query_params, format_override)
+
+    def _dispatch_steps(
+        self,
+        steps: list[dict[str, Any]],
+        query_params: dict[str, str],
+        format_override: str | None,
+    ) -> tuple[int, dict[str, str], str]:
+        """Dispatch a parsed path step list to the right handler."""
+        entity_name = steps[0]["name"]
+
+        # /Entity   or   /Entity/$count  (collection-level endpoints)
+        if len(steps) == 1 or (len(steps) == 2 and steps[1]["kind"] == "count"):
+            if format_override == "xml":
+                return self._error(406, "XML format not supported for this resource")
+            if len(steps) == 2:
+                return self._handle_count(entity_name, query_params)
+            return self._handle_collection(entity_name, query_params)
+
+        if steps[1]["kind"] != "key":
+            return self._error(404, "Not Found")
+        key = steps[1]["value"]
 
         if format_override == "xml":
             return self._error(406, "XML format not supported for this resource")
 
-        if count_suffix == "/$count":
-            return self._handle_count(entity_name, query_params)
-        if key_str is not None:
-            return self._handle_single(entity_name, key_str)
-        return self._handle_collection(entity_name, query_params)
+        # /Entity(key)
+        if len(steps) == 2:
+            return self._handle_single(entity_name, key)
+
+        # Everything beyond the key: segments, $value, $count.
+        return self._walk_segments(entity_name, key, steps[2:], query_params)
+
+    def _walk_segments(
+        self,
+        entity_name: str,
+        key: Any,
+        tail: list[dict[str, Any]],
+        query_params: dict[str, str],
+    ) -> tuple[int, dict[str, str], str]:
+        """Walk the post-key path one step at a time.
+
+        Handles four terminal shapes:
+            */scalar               — JSON {"value": ...}
+            */scalar/$value        — raw text/plain
+            */navSingle            — full entity JSON
+            */navMany              — collection JSON with query options
+            */navMany/$count       — plain integer
+        """
+        current_entity = entity_name
+        current_key: Any = key
+        meta = self._backend.entity_metadata(current_entity)
+
+        # Walk through nav-single segments, ending when we hit either a
+        # scalar property or a nav-many collection.
+        for i, step in enumerate(tail):
+            if step["kind"] in ("value", "count"):
+                return self._error(404, "Not Found")
+            if step["kind"] != "segment":
+                return self._error(404, "Not Found")
+            seg = step["name"]
+            kind = self._classify_segment(meta, seg)
+            remaining = tail[i + 1 :]
+
+            if kind == "property":
+                if not remaining:
+                    return self._handle_property(current_entity, current_key, seg)
+                if len(remaining) == 1 and remaining[0]["kind"] == "value":
+                    return self._handle_property_value(current_entity, current_key, seg)
+                return self._error(404, "Not Found")
+
+            if kind == "nav_single":
+                target = self._navigate_single(current_entity, current_key, seg)
+                if target is None:
+                    return self._error(404, "Navigation target not found")
+                if not remaining:
+                    return self._render_entity(target["entity"], target["record"])
+                current_entity = target["entity"]
+                current_key = target["key"]
+                meta = self._backend.entity_metadata(current_entity)
+                continue
+
+            if kind == "nav_collection":
+                if not remaining:
+                    return self._handle_navigation_collection(
+                        current_entity, current_key, seg, query_params, count_only=False
+                    )
+                if len(remaining) == 1 and remaining[0]["kind"] == "count":
+                    return self._handle_navigation_collection(
+                        current_entity, current_key, seg, query_params, count_only=True
+                    )
+                return self._error(404, "Not Found")
+
+            return self._error(404, f"Unknown segment {seg!r}")
+
+        return self._error(404, "Not Found")
 
     @staticmethod
     def _get_header(headers: dict[str, str] | None, name: str) -> str | None:
@@ -210,13 +383,139 @@ class ODataRequestHandler:
         return 200, self._base_headers(_JSON_CT), _dumps(payload)
 
     def _handle_single(
-        self, entity_name: str, key_str: str
+        self, entity_name: str, key: Any
     ) -> tuple[int, dict[str, str], str]:
-        key = self._parse_key(key_str)
         record = self._backend.get_entity(entity_name, key)
         if record is None:
-            return self._error(404, f"{entity_name}({key_str!r}) not found")
+            return self._error(404, f"{entity_name}({key!r}) not found")
+        return self._render_entity(entity_name, record)
+
+    def _render_entity(
+        self, entity_name: str, record: dict[str, Any]
+    ) -> tuple[int, dict[str, str], str]:
         payload = self._formatter.format_entity(entity_name, record, self._service_root)
+        return 200, self._base_headers(_JSON_CT), _dumps(payload)
+
+    def _classify_segment(
+        self, meta: dict[str, Any], name: str
+    ) -> str | None:
+        """Classify a URL segment against an entity's metadata.
+
+        Returns one of 'property', 'nav_single', 'nav_collection', or None.
+        Navigation wins when a name matches both a property and a relation
+        — this is the usual OData drill-down expectation.
+        """
+        for nav in meta.get("navigation", []):
+            if nav.get("name") == name:
+                return "nav_collection" if nav.get("collection") else "nav_single"
+        for prop in meta.get("properties", []):
+            if prop.get("name") == name:
+                return "property"
+        return None
+
+    def _handle_property(
+        self, entity_name: str, key: Any, prop: str
+    ) -> tuple[int, dict[str, str], str]:
+        record = self._backend.get_entity(entity_name, key)
+        if record is None:
+            return self._error(404, f"{entity_name}({key!r}) not found")
+        if prop not in record:
+            return self._error(404, f"Property {prop!r} not found")
+        context = (
+            f"{self._service_root}/$metadata#{entity_name}({key!r})/{prop}"
+        )
+        body = _dumps({"@odata.context": context, "value": record[prop]})
+        return 200, self._base_headers(_JSON_CT), body
+
+    def _handle_property_value(
+        self, entity_name: str, key: Any, prop: str
+    ) -> tuple[int, dict[str, str], str]:
+        record = self._backend.get_entity(entity_name, key)
+        if record is None:
+            return self._error(404, f"{entity_name}({key!r}) not found")
+        if prop not in record:
+            return self._error(404, f"Property {prop!r} not found")
+        value = record[prop]
+        if value is None:
+            return 204, self._base_headers(_TEXT_CT), ""
+        if isinstance(value, (bytes, bytearray)):
+            return (
+                200,
+                self._base_headers("application/octet-stream"),
+                value.decode("latin-1"),
+            )
+        return 200, self._base_headers(_TEXT_CT), str(value)
+
+    def _navigate_single(
+        self, entity_name: str, key: Any, rel: str
+    ) -> dict[str, Any] | None:
+        """Resolve a single-valued navigation and return target entity+record.
+
+        Backends expose this via an optional ``navigate_single`` method.
+        Returns ``{'entity': str, 'key': Any, 'record': dict}`` or ``None``.
+        """
+        method = getattr(self._backend, "navigate_single", None)
+        if method is None:
+            return None
+        result = method(entity_name, key, rel)
+        if result is None:
+            return None
+        return result
+
+    def _handle_navigation_collection(
+        self,
+        entity_name: str,
+        key: Any,
+        rel: str,
+        query_params: dict[str, str],
+        count_only: bool,
+    ) -> tuple[int, dict[str, str], str]:
+        """Serve /Entity(key)/navMany and /Entity(key)/navMany/$count.
+
+        Resolves the target entity set, then delegates to the backend's
+        ``navigate_collection`` method which applies the FK filter plus
+        standard query options (``$filter``, ``$orderby``, ``$top``, ...).
+        """
+        method = getattr(self._backend, "navigate_collection", None)
+        if method is None:
+            return self._error(
+                501, "Navigation collection not supported by backend"
+            )
+        meta = self._backend.entity_metadata(entity_name)
+        target_entity: str | None = None
+        for nav in meta.get("navigation", []):
+            if nav.get("name") == rel and nav.get("collection"):
+                target_entity = nav.get("target")
+                break
+        if target_entity is None:
+            return self._error(404, f"Navigation {rel!r} not found")
+
+        try:
+            opts = self._build_query_options(target_entity, query_params)
+        except ValueError as exc:
+            return self._error(400, str(exc))
+
+        if count_only:
+            opts.count = True
+            opts.top = None
+            opts.skip = None
+
+        try:
+            result = method(entity_name, key, rel, opts)
+        except ValueError as exc:
+            return self._error(400, str(exc))
+
+        if count_only:
+            count = (
+                result.total_count
+                if result.total_count is not None
+                else len(result.records)
+            )
+            return 200, self._base_headers(_TEXT_CT), str(count)
+
+        payload = self._formatter.format_collection(
+            target_entity, result, self._service_root, opts.skip, opts.top
+        )
         return 200, self._base_headers(_JSON_CT), _dumps(payload)
 
     def _handle_count(
@@ -270,16 +569,6 @@ class ODataRequestHandler:
             opts.expand = self._expand_resolver.resolve(params["$expand"], meta)
 
         return opts
-
-    def _parse_key(self, key_str: str) -> str | int:
-        """Parse a key string: remove quotes for strings, convert ints."""
-        stripped = key_str.strip()
-        if stripped.startswith("'") and stripped.endswith("'"):
-            return stripped[1:-1]
-        try:
-            return int(stripped)
-        except ValueError:
-            return stripped
 
     def _parse_orderby(self, orderby_str: str) -> list[tuple[str, str]]:
         result: list[tuple[str, str]] = []

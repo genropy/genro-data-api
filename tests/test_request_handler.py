@@ -9,7 +9,7 @@ import json
 import pytest
 
 from genro_data_api.core.backend import DataApiBackend
-from genro_data_api.odata.request_handler import ODataRequestHandler
+from genro_data_api.odata.request_handler import ODataRequestHandler, _parse_path
 
 
 @pytest.fixture
@@ -446,3 +446,184 @@ class TestFormatQueryParam:
         assert status == 200
         data = json.loads(body)
         assert len(data["value"]) == 1
+
+
+class TestPathParsing:
+    def test_empty_path(self) -> None:
+        assert _parse_path("") == []
+        assert _parse_path("/") == []
+
+    def test_collection_only(self) -> None:
+        steps = _parse_path("/customer")
+        assert steps == [{"kind": "entity_set", "name": "customer"}]
+
+    def test_collection_count(self) -> None:
+        steps = _parse_path("/customer/$count")
+        assert steps == [
+            {"kind": "entity_set", "name": "customer"},
+            {"kind": "count"},
+        ]
+
+    def test_numeric_key(self) -> None:
+        steps = _parse_path("/customer(42)")
+        assert steps == [
+            {"kind": "entity_set", "name": "customer"},
+            {"kind": "key", "value": 42},
+        ]
+
+    def test_string_key(self) -> None:
+        steps = _parse_path("/customer('ABC')")
+        assert steps == [
+            {"kind": "entity_set", "name": "customer"},
+            {"kind": "key", "value": "ABC"},
+        ]
+
+    def test_property_segment(self) -> None:
+        steps = _parse_path("/customer(1)/name")
+        assert steps == [
+            {"kind": "entity_set", "name": "customer"},
+            {"kind": "key", "value": 1},
+            {"kind": "segment", "name": "name"},
+        ]
+
+    def test_property_value(self) -> None:
+        steps = _parse_path("/customer(1)/name/$value")
+        assert steps[-1] == {"kind": "value"}
+
+    def test_navigation_count(self) -> None:
+        steps = _parse_path("/customer(1)/Orders/$count")
+        assert steps[-1] == {"kind": "count"}
+        assert steps[-2] == {"kind": "segment", "name": "Orders"}
+
+    def test_malformed_unbalanced_paren(self) -> None:
+        assert _parse_path("/customer(1") is None
+        assert _parse_path("/customer1)") is None
+
+    def test_malformed_empty_segments(self) -> None:
+        assert _parse_path("/customer//name") is None
+
+    def test_malformed_paren_in_segment(self) -> None:
+        assert _parse_path("/customer(1)/name(foo)") is None
+
+    def test_composite_key_unsupported(self) -> None:
+        # k1='a',k2=1 — not parsed as a single scalar, returns None.
+        assert _parse_path("/customer(k1='a',k2=1)") is None
+
+
+class TestSegmentNavigation:
+    def test_property_scalar(self, handler: ODataRequestHandler) -> None:
+        status, headers, body = handler.handle("GET", "/odata/customer(1)/name", {})
+        assert status == 200
+        assert "json" in headers.get("Content-Type", "")
+        data = json.loads(body)
+        assert data["value"] == "Alice Corp"
+        assert "@odata.context" in data
+
+    def test_property_value_raw(self, handler: ODataRequestHandler) -> None:
+        status, headers, body = handler.handle(
+            "GET", "/odata/customer(1)/name/$value", {}
+        )
+        assert status == 200
+        assert "text/plain" in headers.get("Content-Type", "")
+        assert body == "Alice Corp"
+
+    def test_property_unknown_404(self, handler: ODataRequestHandler) -> None:
+        status, _, _ = handler.handle("GET", "/odata/customer(1)/unknown_col", {})
+        assert status == 404
+
+    def test_property_on_missing_record_404(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle("GET", "/odata/customer(999)/name", {})
+        assert status == 404
+
+    def test_navigation_single(self, handler: ODataRequestHandler) -> None:
+        status, _, body = handler.handle(
+            "GET", "/odata/order(101)/Customer", {}
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert data["id"] == 1
+        assert data["name"] == "Alice Corp"
+
+    def test_navigation_single_then_property(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        # /order(101)/Customer/name walks nav-single then reads scalar
+        status, _, body = handler.handle(
+            "GET", "/odata/order(101)/Customer/name", {}
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert data["value"] == "Alice Corp"
+
+    def test_navigation_collection_all(self, handler: ODataRequestHandler) -> None:
+        status, _, body = handler.handle(
+            "GET", "/odata/customer(1)/Orders", {}
+        )
+        assert status == 200
+        data = json.loads(body)
+        # Alice has orders 101 and 102
+        ids = sorted(r["id"] for r in data["value"])
+        assert ids == [101, 102]
+
+    def test_navigation_collection_with_filter(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, body = handler.handle(
+            "GET",
+            "/odata/customer(1)/Orders",
+            {"$filter": "amount gt 1000"},
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert len(data["value"]) == 1
+        assert data["value"][0]["id"] == 101
+
+    def test_navigation_collection_with_orderby_and_top(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, body = handler.handle(
+            "GET",
+            "/odata/customer(1)/Orders",
+            {"$orderby": "amount desc", "$top": "1"},
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert len(data["value"]) == 1
+        assert data["value"][0]["id"] == 101
+
+    def test_navigation_count(self, handler: ODataRequestHandler) -> None:
+        status, headers, body = handler.handle(
+            "GET", "/odata/customer(1)/Orders/$count", {}
+        )
+        assert status == 200
+        assert "text/plain" in headers.get("Content-Type", "")
+        assert int(body) == 2
+
+    def test_navigation_count_with_filter(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, body = handler.handle(
+            "GET",
+            "/odata/customer(1)/Orders/$count",
+            {"$filter": "status eq 'delivered'"},
+        )
+        assert status == 200
+        assert int(body) == 1
+
+    def test_cannot_walk_inside_collection_without_key(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer(1)/Orders/status", {}
+        )
+        assert status == 404
+
+    def test_cannot_walk_past_scalar(
+        self, handler: ODataRequestHandler
+    ) -> None:
+        status, _, _ = handler.handle(
+            "GET", "/odata/customer(1)/name/foo", {}
+        )
+        assert status == 404
