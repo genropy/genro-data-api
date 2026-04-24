@@ -4,12 +4,18 @@
 
 from __future__ import annotations
 
+import datetime
 import json
+from decimal import Decimal
 
 import pytest
 
 from genro_data_api.core.backend import DataApiBackend
-from genro_data_api.odata.request_handler import ODataRequestHandler, _parse_path
+from genro_data_api.odata.request_handler import (
+    ODataRequestHandler,
+    _json_default,
+    _parse_path,
+)
 
 
 @pytest.fixture
@@ -932,3 +938,27 @@ class TestMaxPageSize:
             request_headers={"Prefer": "return=representation, wait=10"},
         )
         assert status == 200
+
+
+class TestJsonDefault:
+    """Coverage for the custom JSON serialiser for non-stdlib types."""
+
+    def test_datetime_roundtrip(self) -> None:
+        value = datetime.datetime(2026, 4, 24, 12, 30, 0)
+        assert _json_default(value) == "2026-04-24T12:30:00"
+
+    def test_date_roundtrip(self) -> None:
+        assert _json_default(datetime.date(2026, 4, 24)) == "2026-04-24"
+
+    def test_time_roundtrip(self) -> None:
+        assert _json_default(datetime.time(12, 30, 0)) == "12:30:00"
+
+    def test_decimal_to_float(self) -> None:
+        assert _json_default(Decimal("3.14")) == 3.14
+
+    def test_fallback_to_str(self) -> None:
+        class CustomType:
+            def __str__(self) -> str:
+                return "custom-repr"
+
+        assert _json_default(CustomType()) == "custom-repr"

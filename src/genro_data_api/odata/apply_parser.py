@@ -183,14 +183,6 @@ class ODataApplyParser:
             )
         return self._text[start:self._pos]
 
-    def _expect(self, expected: str) -> None:
-        self._skip_whitespace()
-        if not self._text.startswith(expected, self._pos):
-            raise ValueError(
-                f"Expected {expected!r} at position {self._pos} of $apply"
-            )
-        self._pos += len(expected)
-
     def _read_balanced_parens(self) -> str:
         """Read content between matching outer parens, consuming both.
 

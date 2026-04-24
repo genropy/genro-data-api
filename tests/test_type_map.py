@@ -2,7 +2,12 @@
 
 """Tests for core type mapping."""
 
-from genro_data_api.core.type_map import get_edm_type, get_graphql_type, get_type_mapping, all_mappings
+from genro_data_api.core.type_map import (
+    all_mappings,
+    get_edm_type,
+    get_graphql_type,
+    get_type_mapping,
+)
 
 
 class TestTypeMap:

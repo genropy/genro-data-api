@@ -54,7 +54,7 @@ def decode(token: str) -> dict[str, Any]:
     padding = "=" * (-len(token) % 4)
     try:
         raw = base64.urlsafe_b64decode((token + padding).encode("ascii"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover
         raise ValueError(f"Malformed $skiptoken: {exc!s}") from None
     try:
         payload = json.loads(raw)

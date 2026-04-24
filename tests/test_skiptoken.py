@@ -51,6 +51,18 @@ class TestEncodeDecode:
         with pytest.raises(ValueError, match="Unsupported"):
             decode(token)
 
+    def test_non_utf8_bytes_rejected(self) -> None:
+        import base64
+        token = base64.urlsafe_b64encode(b"\xff\xfe\xfd").decode().rstrip("=")
+        with pytest.raises(ValueError, match="Malformed"):
+            decode(token)
+
+    def test_json_array_rejected(self) -> None:
+        import base64
+        token = base64.urlsafe_b64encode(b"[1, 2, 3]").decode().rstrip("=")
+        with pytest.raises(ValueError, match="not a JSON object"):
+            decode(token)
+
 
 class TestFilterHash:
     def test_ignores_pagination_params(self) -> None:
