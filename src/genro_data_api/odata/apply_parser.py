@@ -101,8 +101,23 @@ class ApplyPipeline:
 
         Used by the response formatter to build the ``@odata.context``
         projection clause ``#EntitySet(col1,col2,...)``.
+
+        The shape is dictated by the **last** shape-producing step in
+        the pipeline (``groupby`` or ``aggregate``); any earlier
+        shape-producing step is rolled up by the later one, matching
+        OData ``$apply`` semantics:
+
+        - ``aggregate(...)`` collapses the input to a single row whose
+          columns are the aliases; any prior grouping is dropped.
+        - ``groupby((keys), aggregate(...))`` emits one row per group,
+          columns = keys plus the inner aggregate aliases.
+        - ``groupby((keys))`` with no inner aggregate emits distinct
+          tuples of the keys.
+
+        Pipelines made only of ``filter`` steps produce no new shape
+        and return an empty list; callers should keep the input
+        entity's native columns in that case.
         """
-        # Scan steps right-to-left: the last groupby/aggregate dictates the shape.
         for step in reversed(self.steps):
             if isinstance(step, AggregateStep):
                 return [i.alias for i in step.items]
