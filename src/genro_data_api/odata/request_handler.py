@@ -359,6 +359,7 @@ class ODataRequestHandler:
         value = [
             {
                 "name": es["name"],
+                "kind": "EntitySet",
                 "url": es["name"],
                 "title": es.get("title", es["name"]),
             }
