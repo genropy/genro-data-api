@@ -23,7 +23,7 @@ from genro_data_api.odata.filter_parser import ODataFilterParser
 from genro_data_api.odata.response import ODataResponseFormatter
 
 _JSON_CT = "application/json;charset=UTF-8"
-_XML_CT = "application/xml;charset=UTF-8"
+_XML_CT = "application/xml"
 _TEXT_CT = "text/plain"
 
 _ODATA_VERSION = "4.0"
