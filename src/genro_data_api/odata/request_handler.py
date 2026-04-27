@@ -31,7 +31,12 @@ _ODATA_VERSION = "4.0"
 
 def _json_default(obj: object) -> str | float:
     """JSON serializer for types not handled by stdlib json."""
-    if isinstance(obj, (datetime.datetime, datetime.date)):
+    if isinstance(obj, datetime.datetime):
+        # Edm.DateTimeOffset requires an offset; assume UTC for naive values.
+        if obj.tzinfo is None:
+            obj = obj.replace(tzinfo=datetime.timezone.utc)
+        return obj.isoformat()
+    if isinstance(obj, datetime.date):
         return obj.isoformat()
     if isinstance(obj, datetime.time):
         return obj.isoformat()
