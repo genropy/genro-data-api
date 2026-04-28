@@ -943,9 +943,14 @@ class TestMaxPageSize:
 class TestJsonDefault:
     """Coverage for the custom JSON serialiser for non-stdlib types."""
 
-    def test_datetime_roundtrip(self) -> None:
+    def test_datetime_naive_assumed_utc(self) -> None:
         value = datetime.datetime(2026, 4, 24, 12, 30, 0)
-        assert _json_default(value) == "2026-04-24T12:30:00"
+        assert _json_default(value) == "2026-04-24T12:30:00+00:00"
+
+    def test_datetime_aware_preserves_offset(self) -> None:
+        tz = datetime.timezone(datetime.timedelta(hours=2))
+        value = datetime.datetime(2026, 4, 24, 12, 30, 0, tzinfo=tz)
+        assert _json_default(value) == "2026-04-24T12:30:00+02:00"
 
     def test_date_roundtrip(self) -> None:
         assert _json_default(datetime.date(2026, 4, 24)) == "2026-04-24"

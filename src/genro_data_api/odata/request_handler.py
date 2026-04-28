@@ -23,7 +23,7 @@ from genro_data_api.odata.filter_parser import ODataFilterParser
 from genro_data_api.odata.response import ODataResponseFormatter
 
 _JSON_CT = "application/json;charset=UTF-8"
-_XML_CT = "application/xml;charset=UTF-8"
+_XML_CT = "application/xml"
 _TEXT_CT = "text/plain"
 
 _ODATA_VERSION = "4.0"
@@ -31,7 +31,12 @@ _ODATA_VERSION = "4.0"
 
 def _json_default(obj: object) -> str | float:
     """JSON serializer for types not handled by stdlib json."""
-    if isinstance(obj, (datetime.datetime, datetime.date)):
+    if isinstance(obj, datetime.datetime):
+        # Edm.DateTimeOffset requires an offset; assume UTC for naive values.
+        if obj.tzinfo is None:
+            obj = obj.replace(tzinfo=datetime.timezone.utc)
+        return obj.isoformat()
+    if isinstance(obj, datetime.date):
         return obj.isoformat()
     if isinstance(obj, datetime.time):
         return obj.isoformat()
@@ -359,6 +364,7 @@ class ODataRequestHandler:
         value = [
             {
                 "name": es["name"],
+                "kind": "EntitySet",
                 "url": es["name"],
                 "title": es.get("title", es["name"]),
             }
